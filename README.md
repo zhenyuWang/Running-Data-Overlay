@@ -1,2 +1,34 @@
-# Running-Data-Overlay
-基于跑步数据生成视频浮层
+# Running Data Overlay
+
+原生 macOS 应用，用于将跑步数据同步为视频浮层。
+
+## 本地构建与启动
+
+前提：macOS 已安装 Xcode 或 Xcode Command Line Tools。
+
+```zsh
+make build
+make run
+```
+
+`make build` 会生成 `build/RunningDataOverlay.app`。也可以直接通过 Finder 双击该应用，或执行：
+
+```zsh
+open build/RunningDataOverlay.app
+```
+
+当前版本提供了 SwiftUI 原生窗口与视频、FIT 素材导入入口的界面骨架。后续功能将在此基础上加入 FIT 解析、视频与运动时间对齐、数据组件编排及透明视频导出。
+
+## 当前能力
+
+- 导入并播放本地视频，支持自定义播放控制和播放进度。
+- 导入多个 `.fit` 运动文件，解析 FIT record、session 与 compressed timestamp 消息。
+- 基于 FIT 数据创建距离、配速、心率、步频、步幅、GPS 轨迹、运动开始时间和天气信息组件；未写入 FIT 的天气信息会明确标记为缺失。
+- 视频与运动文件可放入独立时间线轨道，支持拖动调整相对位置。
+- 自动对齐使用视频文件创建时间与 FIT 内的运动开始时间作为初始位置，仍可人工微调。
+
+使用根目录的测试文件验证解析器：
+
+```zsh
+make test-fit
+```
