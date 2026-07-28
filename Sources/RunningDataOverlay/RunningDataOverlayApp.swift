@@ -8,12 +8,18 @@ import UniformTypeIdentifiers
 
 @main
 struct RunningDataOverlayApp: App {
+    private var defaultWindowSize: CGSize {
+        let availableScreenSize = NSScreen.main?.visibleFrame.size
+            ?? CGSize(width: 1_572, height: 720)
+        return OverlayDesign.defaultWindowSize(forAvailableScreenSize: availableScreenSize)
+    }
+
     var body: some Scene {
         WindowGroup("Run Overlay") {
             ContentView()
                 .frame(minWidth: 900, minHeight: 600)
         }
-        .defaultSize(width: 1100, height: 720)
+        .defaultSize(width: defaultWindowSize.width, height: defaultWindowSize.height)
     }
 }
 
@@ -656,6 +662,20 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
 
     var id: Self { self }
 
+    var designKind: OverlayComponentKind {
+        switch self {
+        case .distance: return .distance
+        case .pace: return .pace
+        case .heartRate: return .heartRate
+        case .cadence: return .cadence
+        case .strideLength: return .strideLength
+        case .gpsTrack: return .gpsTrack
+        case .elapsedTime: return .elapsedTime
+        case .activityDateTime: return .activityDateTime
+        case .weather: return .weather
+        }
+    }
+
     var title: String {
         switch self {
         case .distance:
@@ -967,44 +987,20 @@ private struct DistanceOverlayDisplay {
         unit: OverlayUnit,
         configuration: DistanceOverlayConfiguration
     ) {
-        let divisor = unit == .miles ? 1_609.344 : 1_000
-        let unitLabel = unit == .miles ? "mi" : "km"
-        let start = max(0, configuration.startDistance)
-        let activityEnd = activity?.totalDistanceMeters.map { $0 / divisor }
-        let configuredEnd = max(start, configuration.endDistance)
-        let end = configuration.usesActivityEndDistance
-            ? max(start, activityEnd ?? configuredEnd)
-            : configuredEnd
-        let current = max(
-            0,
-            activity?.sample(at: activityTime)?.distanceMeters.map { $0 / divisor } ?? start
+        let calculation = DistanceProgressCalculation(
+            startDistance: configuration.startDistance,
+            configuredEndDistance: configuration.endDistance,
+            usesActivityEndDistance: configuration.usesActivityEndDistance,
+            activityEndDistanceMeters: activity?.totalDistanceMeters,
+            currentDistanceMeters: activity?.sample(at: activityTime)?.distanceMeters,
+            unit: unit == .miles ? .miles : .kilometers
         )
-
-        startDistance = start
-        currentDistance = current
-        endDistance = end
-        self.unit = unitLabel
-        if end > start {
-            progress = min(max((current - start) / (end - start), 0), 1)
-        } else {
-            progress = current >= end ? 1 : 0
-        }
-
-        let startMeters = start * divisor
-        let endMeters = end * divisor
-        if endMeters > startMeters {
-            let firstKilometer = Int(ceil(startMeters / 1_000))
-            let lastKilometer = Int(floor(endMeters / 1_000))
-            if firstKilometer <= lastKilometer {
-                kilometerTickProgresses = (firstKilometer...lastKilometer).map { kilometer in
-                    (Double(kilometer) * 1_000 - startMeters) / (endMeters - startMeters)
-                }
-            } else {
-                kilometerTickProgresses = []
-            }
-        } else {
-            kilometerTickProgresses = []
-        }
+        startDistance = calculation.startDistance
+        currentDistance = calculation.currentDistance
+        endDistance = calculation.endDistance
+        self.unit = calculation.unit
+        progress = calculation.progress
+        kilometerTickProgresses = calculation.kilometerTickProgresses
     }
 }
 
@@ -1093,13 +1089,22 @@ private struct DistanceOverlayConfiguration {
     var showsCurrentDistance = true
     var showsEndDistance = true
     var showsScale = true
-    var lineWidth = 4.0
-    var lineHexColor = "#FFFFFF"
-    var progressHexColor = "#30D158"
-    var length = 650.0
-    var startValueStyle = OverlayTextStyle(fontSize: 16, hexColor: "#FFFFFF")
-    var currentValueStyle = OverlayTextStyle(fontSize: 18, hexColor: "#30D158")
-    var endValueStyle = OverlayTextStyle(fontSize: 16, hexColor: "#FFFFFF")
+    var lineWidth = OverlayDesign.distanceLineWidth
+    var lineHexColor = OverlayDesign.distanceLineHexColor
+    var progressHexColor = OverlayDesign.distanceProgressHexColor
+    var length = OverlayDesign.distanceLength
+    var startValueStyle = OverlayTextStyle(
+        fontSize: OverlayDesign.distanceEndpointFontSize,
+        hexColor: OverlayDesign.distanceLineHexColor
+    )
+    var currentValueStyle = OverlayTextStyle(
+        fontSize: OverlayDesign.distanceCurrentFontSize,
+        hexColor: OverlayDesign.distanceProgressHexColor
+    )
+    var endValueStyle = OverlayTextStyle(
+        fontSize: OverlayDesign.distanceEndpointFontSize,
+        hexColor: OverlayDesign.distanceLineHexColor
+    )
 }
 
 private struct OverlayPosition {
@@ -1107,17 +1112,8 @@ private struct OverlayPosition {
     var vertical: Double
 
     static func defaultPosition(for component: OverlayComponent) -> Self {
-        switch component {
-        case .distance: return Self(horizontal: 0.50, vertical: 0.07)
-        case .pace: return Self(horizontal: 0.06, vertical: 0.68)
-        case .heartRate: return Self(horizontal: 0.06, vertical: 0.745)
-        case .cadence: return Self(horizontal: 0.06, vertical: 0.81)
-        case .strideLength: return Self(horizontal: 0.06, vertical: 0.875)
-        case .gpsTrack: return Self(horizontal: 0.936, vertical: 0.25)
-        case .elapsedTime: return Self(horizontal: 0.052, vertical: 0.94)
-        case .activityDateTime: return Self(horizontal: 0.94, vertical: 0.922)
-        case .weather: return Self(horizontal: 0.928, vertical: 0.841)
-        }
+        let position = OverlayDesign.defaultPosition(for: component.designKind)
+        return Self(horizontal: position.horizontal, vertical: position.vertical)
     }
 }
 
@@ -1142,10 +1138,9 @@ private struct OverlayComponentInstance: Identifiable {
         self.component = component
         unit = OverlayUnit.defaultUnit(for: component)
         position = OverlayPosition.defaultPosition(for: component)
-        if component == .distance || component == .activityDateTime {
-            showsIcon = false
-        } else if component == .weather {
-            iconStyle.hexColor = "#FFFFFF"
+        showsIcon = OverlayDesign.showsIconByDefault(for: component.designKind)
+        if component == .weather {
+            iconStyle.hexColor = OverlayDesign.weatherIconHexColor
         }
     }
 }
@@ -1217,8 +1212,6 @@ private enum OverlayUnit: String, CaseIterable, Identifiable {
 }
 
 private struct OverlayCanvas: View {
-    private static let referenceSize = CGSize(width: 1_064, height: 598)
-
     @Binding var overlays: [OverlayComponentInstance]
     @Binding var selectedOverlayID: UUID?
     let activity: FitActivity?
@@ -1227,19 +1220,12 @@ private struct OverlayCanvas: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let componentScale = max(
-                0.01,
-                min(
-                    geometry.size.width / Self.referenceSize.width,
-                    geometry.size.height / Self.referenceSize.height
-                )
-            )
+            let componentScale = OverlayDesign.componentScale(forCanvasSize: geometry.size)
 
             ZStack(alignment: .topLeading) {
                 ForEach(overlays.indices, id: \.self) { index in
                     let overlay = overlays[index]
-                    overlayContent(for: overlay)
-                        .scaleEffect(componentScale)
+                    overlayContent(for: overlay, renderScale: componentScale)
                         .contentShape(Rectangle())
                         .position(
                             x: geometry.size.width * overlay.position.horizontal,
@@ -1278,7 +1264,10 @@ private struct OverlayCanvas: View {
     }
 
     @ViewBuilder
-    private func overlayContent(for overlay: OverlayComponentInstance) -> some View {
+    private func overlayContent(
+        for overlay: OverlayComponentInstance,
+        renderScale: CGFloat
+    ) -> some View {
         if overlay.component == .distance {
             DistanceProgressOverlay(
                 overlay: overlay,
@@ -1288,25 +1277,36 @@ private struct OverlayCanvas: View {
                     unit: overlay.unit,
                     configuration: overlay.distance
                 ),
-                isSelected: selectedOverlayID == overlay.id
+                isSelected: selectedOverlayID == overlay.id,
+                renderScale: renderScale
             )
         } else if overlay.component == .gpsTrack,
            let activity,
            activity.gpsPoints.count > 1 {
-            GPSRouteOverlay(activity: activity, activityTime: activityTime)
+            GPSRouteOverlay(
+                activity: activity,
+                activityTime: activityTime,
+                renderScale: renderScale
+            )
         } else if overlay.component == .activityDateTime {
             OverlayDateTimeBadge(
                 overlay: overlay,
                 display: overlay.component.dateTimeDisplayValue(in: activity, at: activityTime),
-                isSelected: selectedOverlayID == overlay.id
+                isSelected: selectedOverlayID == overlay.id,
+                renderScale: renderScale
             )
         } else if overlay.component == .weather {
-            ManualWeatherBadge(overlay: overlay, isSelected: selectedOverlayID == overlay.id)
+            ManualWeatherBadge(
+                overlay: overlay,
+                isSelected: selectedOverlayID == overlay.id,
+                renderScale: renderScale
+            )
         } else {
             OverlayBadge(
                 overlay: overlay,
                 display: overlay.component.overlayDisplayValue(in: activity, unit: overlay.unit, at: activityTime),
-                isSelected: selectedOverlayID == overlay.id
+                isSelected: selectedOverlayID == overlay.id,
+                renderScale: renderScale
             )
         }
     }
@@ -1316,17 +1316,18 @@ private struct DistanceProgressOverlay: View {
     let overlay: OverlayComponentInstance
     let display: DistanceOverlayDisplay
     let isSelected: Bool
+    let renderScale: CGFloat
 
     private var configuration: DistanceOverlayConfiguration {
         overlay.distance
     }
 
     private var length: CGFloat {
-        max(120, configuration.length)
+        max(120, configuration.length) * renderScale
     }
 
     private var lineWidth: CGFloat {
-        max(1, configuration.lineWidth)
+        max(1, configuration.lineWidth) * renderScale
     }
 
     private var progressWidth: CGFloat {
@@ -1334,7 +1335,7 @@ private struct DistanceProgressOverlay: View {
     }
 
     private var markerSize: CGFloat {
-        max(10, lineWidth * 2.4)
+        max(10 * renderScale, lineWidth * 2.4)
     }
 
     private var markerPosition: CGFloat {
@@ -1342,13 +1343,13 @@ private struct DistanceProgressOverlay: View {
     }
 
     private var trackHeight: CGFloat {
-        max(16, markerSize)
+        max(16 * renderScale, markerSize)
     }
 
     private var currentLabelWidth: CGFloat {
         let estimatedWidth = CGFloat(formattedDistance(display.currentDistance).count)
-            * configuration.currentValueStyle.fontSize * 0.62
-        return min(length, max(60, estimatedWidth))
+            * configuration.currentValueStyle.fontSize * renderScale * 0.62
+        return min(length, max(60 * renderScale, estimatedWidth))
     }
 
     private func formattedDistance(_ distance: Double) -> String {
@@ -1356,14 +1357,14 @@ private struct DistanceProgressOverlay: View {
     }
 
     var body: some View {
-        VStack(spacing: 5) {
-            HStack(spacing: 8) {
+        VStack(spacing: 5 * renderScale) {
+            HStack(spacing: 8 * renderScale) {
                 if configuration.showsStartDistance {
                     Text(formattedDistance(display.startDistance))
                         .monospacedDigit()
                         .lineLimit(1)
                         .font(.system(
-                            size: configuration.startValueStyle.fontSize,
+                            size: configuration.startValueStyle.fontSize * renderScale,
                             weight: .semibold,
                             design: .rounded
                         ))
@@ -1376,7 +1377,7 @@ private struct DistanceProgressOverlay: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .font(.system(
-                            size: configuration.endValueStyle.fontSize,
+                            size: configuration.endValueStyle.fontSize * renderScale,
                             weight: .semibold,
                             design: .rounded
                         ))
@@ -1386,8 +1387,8 @@ private struct DistanceProgressOverlay: View {
                 }
             }
             .frame(width: length, height: max(
-                configuration.showsStartDistance ? configuration.startValueStyle.fontSize : 0,
-                configuration.showsEndDistance ? configuration.endValueStyle.fontSize : 0
+                configuration.showsStartDistance ? configuration.startValueStyle.fontSize * renderScale : 0,
+                configuration.showsEndDistance ? configuration.endValueStyle.fontSize * renderScale : 0
             ))
 
             ZStack(alignment: .leading) {
@@ -1403,26 +1404,34 @@ private struct DistanceProgressOverlay: View {
 
                 if configuration.showsScale {
                     DistanceScaleShape(
-                        progressValues: display.kilometerTickProgresses.filter { $0 <= display.progress }
+                        progressValues: display.kilometerTickProgresses.filter { $0 <= display.progress },
+                        tickHalfHeight: 4 * renderScale
                     )
                         .stroke(
                             Color(hexColor: configuration.progressHexColor),
-                            style: StrokeStyle(lineWidth: max(1, lineWidth * 0.35), lineCap: .round)
+                            style: StrokeStyle(
+                                lineWidth: max(renderScale, lineWidth * 0.35),
+                                lineCap: .round
+                            )
                         )
 
                     DistanceScaleShape(
-                        progressValues: display.kilometerTickProgresses.filter { $0 > display.progress }
+                        progressValues: display.kilometerTickProgresses.filter { $0 > display.progress },
+                        tickHalfHeight: 4 * renderScale
                     )
                         .stroke(
                             Color(hexColor: configuration.lineHexColor),
-                            style: StrokeStyle(lineWidth: max(1, lineWidth * 0.35), lineCap: .round)
+                            style: StrokeStyle(
+                                lineWidth: max(renderScale, lineWidth * 0.35),
+                                lineCap: .round
+                            )
                         )
                 }
 
                 Circle()
                     .fill(Color(hexColor: configuration.progressHexColor))
                     .frame(width: markerSize, height: markerSize)
-                    .shadow(color: .black.opacity(0.45), radius: 1)
+                    .shadow(color: .black.opacity(0.45), radius: renderScale)
                     .position(x: markerPosition, y: trackHeight / 2)
             }
             .frame(width: length, height: trackHeight)
@@ -1433,7 +1442,7 @@ private struct DistanceProgressOverlay: View {
                         .monospacedDigit()
                         .lineLimit(1)
                         .font(.system(
-                            size: configuration.currentValueStyle.fontSize,
+                            size: configuration.currentValueStyle.fontSize * renderScale,
                             weight: .semibold,
                             design: .rounded
                         ))
@@ -1442,16 +1451,21 @@ private struct DistanceProgressOverlay: View {
                         .frame(width: currentLabelWidth)
                         .position(
                             x: markerPosition,
-                            y: configuration.currentValueStyle.fontSize / 2
+                            y: configuration.currentValueStyle.fontSize * renderScale / 2
                         )
                 }
             }
-            .frame(width: length, height: configuration.showsCurrentDistance ? configuration.currentValueStyle.fontSize : 0)
+            .frame(
+                width: length,
+                height: configuration.showsCurrentDistance
+                    ? configuration.currentValueStyle.fontSize * renderScale
+                    : 0
+            )
         }
-        .padding(6)
+        .padding(6 * renderScale)
         .overlay {
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: 4 * renderScale)
+                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2 * renderScale)
         }
         .contentShape(Rectangle())
     }
@@ -1459,13 +1473,14 @@ private struct DistanceProgressOverlay: View {
 
 private struct DistanceScaleShape: Shape {
     let progressValues: [Double]
+    let tickHalfHeight: CGFloat
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
         for progress in progressValues {
             let x = rect.minX + rect.width * min(max(progress, 0), 1)
-            path.move(to: CGPoint(x: x, y: rect.midY - 4))
-            path.addLine(to: CGPoint(x: x, y: rect.midY + 4))
+            path.move(to: CGPoint(x: x, y: rect.midY - tickHalfHeight))
+            path.addLine(to: CGPoint(x: x, y: rect.midY + tickHalfHeight))
         }
         return path
     }
@@ -1474,7 +1489,8 @@ private struct DistanceScaleShape: Shape {
 private struct GPSRouteOverlay: View {
     let activity: FitActivity
     let activityTime: Double
-    private let routeColor = Color(hexColor: "#63E677")
+    let renderScale: CGFloat
+    private let routeColor = Color(hexColor: OverlayDesign.gpsRouteHexColor)
 
     var body: some View {
         GeometryReader { geometry in
@@ -1482,26 +1498,31 @@ private struct GPSRouteOverlay: View {
                 points: activity.gpsPoints,
                 startDate: activity.startDate,
                 activityTime: activityTime,
-                size: geometry.size
+                size: geometry.size,
+                padding: Double(10 * renderScale)
             )
 
             ZStack {
                 GPSRouteShape(points: layout.points)
                     .stroke(
                         routeColor,
-                        style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round)
+                        style: StrokeStyle(
+                            lineWidth: 3 * renderScale,
+                            lineCap: .round,
+                            lineJoin: .round
+                        )
                     )
 
                 if let currentPosition = layout.currentPosition {
                     Image(systemName: "location.north.fill")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 13 * renderScale, weight: .bold))
                         .foregroundStyle(.red)
                         .rotationEffect(.degrees(layout.headingDegrees ?? 0))
                         .position(currentPosition)
                 }
             }
         }
-        .frame(width: 150, height: 190)
+        .frame(width: 150 * renderScale, height: 190 * renderScale)
         .contentShape(Rectangle())
     }
 }
@@ -1528,7 +1549,13 @@ private struct GPSRouteLayout {
     let currentPosition: CGPoint?
     let headingDegrees: Double?
 
-    init(points gpsPoints: [FitGPSPoint], startDate: Date?, activityTime: Double, size: CGSize) {
+    init(
+        points gpsPoints: [FitGPSPoint],
+        startDate: Date?,
+        activityTime: Double,
+        size: CGSize,
+        padding: Double = 10
+    ) {
         guard gpsPoints.count > 1 else {
             points = []
             currentPosition = nil
@@ -1553,7 +1580,6 @@ private struct GPSRouteLayout {
         let maximumY = verticalValues.max() ?? 0
         let horizontalRange = max(maximumX - minimumX, 0.000_001)
         let verticalRange = max(maximumY - minimumY, 0.000_001)
-        let padding = 10.0
         let scale = min(
             max(Double(size.width) - padding * 2, 1) / horizontalRange,
             max(Double(size.height) - padding * 2, 1) / verticalRange
@@ -1599,87 +1625,64 @@ private struct OverlayBadge: View {
     let overlay: OverlayComponentInstance
     let display: OverlayDisplayValue
     let isSelected: Bool
+    let renderScale: CGFloat
 
     private var iconColumnWidth: CGFloat {
-        max(28, overlay.iconStyle.fontSize * 1.25)
+        OverlayDesign.iconColumnWidth(fontSize: overlay.iconStyle.fontSize) * renderScale
     }
 
     private var backgroundColor: Color {
-        overlay.showsBackground ? .black.opacity(0.5) : .clear
+        overlay.showsBackground ? .black.opacity(OverlayDesign.badgeBackgroundOpacity) : .clear
     }
 
     private var iconRotation: Angle {
-        overlay.component == .cadence ? .degrees(30) : .zero
+        .degrees(OverlayDesign.iconRotationDegrees(for: overlay.component.designKind))
     }
 
     private var iconScale: CGFloat {
-        switch overlay.component {
-        case .pace:
-            return 1.15
-        case .cadence:
-            return 0.84
-        case .strideLength:
-            return 1.30
-        case .distance, .heartRate, .gpsTrack, .elapsedTime, .activityDateTime, .weather:
-            return 1
-        }
-    }
-
-    private var metricValueWidthAllowance: CGFloat? {
-        switch overlay.component {
-        case .pace, .heartRate, .cadence, .strideLength:
-            return max(42, overlay.valueStyle.fontSize * 3.0)
-        case .distance, .gpsTrack, .elapsedTime, .activityDateTime, .weather:
-            return nil
-        }
+        OverlayDesign.iconScale(for: overlay.component.designKind)
     }
 
     private var reservesThreeDigitValueWidth: Bool {
-        switch overlay.component {
-        case .heartRate, .cadence, .strideLength:
-            return true
-        case .distance, .pace, .gpsTrack, .elapsedTime, .activityDateTime, .weather:
-            return false
-        }
+        OverlayDesign.reservesThreeDigitValueWidth(for: overlay.component.designKind)
     }
 
     private var fixedMetricContentWidth: CGFloat? {
-        switch overlay.component {
-        case .pace, .heartRate, .cadence, .strideLength:
-            let widestValueColumn = max(42, overlay.valueStyle.fontSize * 3.0)
-            let unitAllowance = max(30, overlay.unitStyle.fontSize * 2.2)
-            return iconColumnWidth + 14 + widestValueColumn + unitAllowance
-        case .distance, .gpsTrack, .elapsedTime, .activityDateTime, .weather:
-            return nil
-        }
+        OverlayDesign.fixedMetricContentWidth(
+            for: overlay.component.designKind,
+            iconFontSize: overlay.iconStyle.fontSize,
+            valueFontSize: overlay.valueStyle.fontSize,
+            unitFontSize: overlay.unitStyle.fontSize
+        ).map { $0 * renderScale }
     }
 
     private var valueUnitSpacing: CGFloat {
-        switch overlay.component {
-        case .pace, .heartRate, .cadence, .strideLength:
-            return 3.5
-        case .distance, .gpsTrack, .elapsedTime, .activityDateTime, .weather:
-            return 7
-        }
+        OverlayDesign.valueUnitSpacing(for: overlay.component.designKind) * renderScale
     }
 
     private var fixedValueUnitContentWidth: CGFloat? {
-        guard let metricValueWidthAllowance else {
-            return nil
-        }
-        let unitAllowance = max(30, overlay.unitStyle.fontSize * 2.2)
-        return metricValueWidthAllowance + valueUnitSpacing + unitAllowance
+        OverlayDesign.fixedValueUnitContentWidth(
+            for: overlay.component.designKind,
+            valueFontSize: overlay.valueStyle.fontSize,
+            unitFontSize: overlay.unitStyle.fontSize
+        ).map { $0 * renderScale }
     }
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: OverlayDesign.badgeContentSpacing * renderScale) {
             if overlay.showsIcon {
                 Image(systemName: overlay.component.systemImage)
-                    .font(.system(size: overlay.iconStyle.fontSize, weight: .semibold, design: .rounded))
+                    .font(.system(
+                        size: overlay.iconStyle.fontSize * renderScale * iconScale,
+                        weight: .semibold,
+                        design: .rounded
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.iconStyle.hexColor))
                     .rotationEffect(iconRotation)
-                    .scaleEffect(iconScale)
-                    .frame(width: iconColumnWidth, height: overlay.iconStyle.fontSize)
+                    .frame(
+                        width: iconColumnWidth,
+                        height: overlay.iconStyle.fontSize * renderScale
+                    )
             }
             HStack(spacing: valueUnitSpacing) {
                 ZStack(alignment: .leading) {
@@ -1687,13 +1690,21 @@ private struct OverlayBadge: View {
                         Text("000")
                             .monospacedDigit()
                             .lineLimit(1)
-                            .font(.system(size: overlay.valueStyle.fontSize, weight: .semibold, design: .rounded))
+                            .font(.system(
+                                size: overlay.valueStyle.fontSize * renderScale,
+                                weight: .semibold,
+                                design: .rounded
+                            ))
                             .hidden()
                     }
                     Text(display.value)
                         .monospacedDigit()
                         .lineLimit(1)
-                        .font(.system(size: overlay.valueStyle.fontSize, weight: .semibold, design: .rounded))
+                        .font(.system(
+                            size: overlay.valueStyle.fontSize * renderScale,
+                            weight: .semibold,
+                            design: .rounded
+                        ))
                         .foregroundStyle(Color(hexColor: overlay.valueStyle.hexColor))
                 }
                 .fixedSize(horizontal: true, vertical: false)
@@ -1701,21 +1712,30 @@ private struct OverlayBadge: View {
                     Text(display.unit)
                         .monospacedDigit()
                         .lineLimit(1)
-                        .font(.system(size: overlay.unitStyle.fontSize, weight: .semibold, design: .rounded))
+                        .font(.system(
+                            size: overlay.unitStyle.fontSize * renderScale,
+                            weight: .semibold,
+                            design: .rounded
+                        ))
                         .foregroundStyle(Color(hexColor: overlay.unitStyle.hexColor))
                 }
             }
             .frame(minWidth: fixedValueUnitContentWidth, alignment: .leading)
         }
         .frame(minWidth: fixedMetricContentWidth, alignment: .leading)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, OverlayDesign.badgeHorizontalPadding * renderScale)
+        .padding(.vertical, OverlayDesign.badgeVerticalPadding * renderScale)
         .background(backgroundColor)
         .overlay {
-            RoundedRectangle(cornerRadius: 5)
-                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: OverlayDesign.badgeCornerRadius * renderScale)
+                .stroke(
+                    isSelected ? Color.accentColor : .clear,
+                    lineWidth: 2 * renderScale
+                )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(
+            cornerRadius: OverlayDesign.badgeCornerRadius * renderScale
+        ))
     }
 }
 
@@ -1723,66 +1743,98 @@ private struct OverlayDateTimeBadge: View {
     let overlay: OverlayComponentInstance
     let display: OverlayDateTimeDisplay
     let isSelected: Bool
+    let renderScale: CGFloat
 
     private var backgroundColor: Color {
-        overlay.showsBackground ? .black.opacity(0.5) : .clear
+        overlay.showsBackground ? .black.opacity(OverlayDesign.badgeBackgroundOpacity) : .clear
     }
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 2) {
+        VStack(alignment: .trailing, spacing: 2 * renderScale) {
             Text(display.time)
                 .monospacedDigit()
-                .font(.system(size: overlay.valueStyle.fontSize, weight: .semibold, design: .rounded))
+                .font(.system(
+                    size: overlay.valueStyle.fontSize * renderScale,
+                    weight: .semibold,
+                    design: .rounded
+                ))
                 .foregroundStyle(Color(hexColor: overlay.valueStyle.hexColor))
             if !display.date.isEmpty {
                 Text(display.date)
                     .monospacedDigit()
-                    .font(.system(size: overlay.unitStyle.fontSize, weight: .semibold, design: .rounded))
+                    .font(.system(
+                        size: overlay.unitStyle.fontSize * renderScale,
+                        weight: .semibold,
+                        design: .rounded
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.unitStyle.hexColor))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, OverlayDesign.badgeHorizontalPadding * renderScale)
+        .padding(.vertical, OverlayDesign.badgeVerticalPadding * renderScale)
         .background(backgroundColor)
         .overlay {
-            RoundedRectangle(cornerRadius: 5)
-                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: OverlayDesign.badgeCornerRadius * renderScale)
+                .stroke(
+                    isSelected ? Color.accentColor : .clear,
+                    lineWidth: 2 * renderScale
+                )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(
+            cornerRadius: OverlayDesign.badgeCornerRadius * renderScale
+        ))
     }
 }
 
 private struct ManualWeatherBadge: View {
     let overlay: OverlayComponentInstance
     let isSelected: Bool
+    let renderScale: CGFloat
 
     private var backgroundColor: Color {
-        overlay.showsBackground ? .black.opacity(0.5) : .clear
+        overlay.showsBackground ? .black.opacity(OverlayDesign.badgeBackgroundOpacity) : .clear
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 2 * renderScale) {
+            HStack(spacing: OverlayDesign.badgeContentSpacing * renderScale) {
                 if overlay.showsIcon {
                     Image(systemName: overlay.weather.condition.systemImage)
-                        .font(.system(size: overlay.iconStyle.fontSize, weight: .semibold))
+                        .font(.system(
+                            size: overlay.iconStyle.fontSize * renderScale,
+                            weight: .semibold
+                        ))
                         .foregroundStyle(Color(hexColor: overlay.iconStyle.hexColor))
                 }
                 Text(String(format: "%.0f°C", overlay.weather.temperatureCelsius))
                     .monospacedDigit()
-                    .font(.system(size: overlay.valueStyle.fontSize, weight: .semibold, design: .rounded))
+                    .font(.system(
+                        size: overlay.valueStyle.fontSize * renderScale,
+                        weight: .semibold,
+                        design: .rounded
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.valueStyle.hexColor))
                 Image(systemName: "humidity.fill")
-                    .font(.system(size: overlay.humidityIconStyle.fontSize, weight: .medium))
+                    .font(.system(
+                        size: overlay.humidityIconStyle.fontSize * renderScale,
+                        weight: .medium
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.humidityIconStyle.hexColor))
                 Text(String(format: "%.0f%%", overlay.weather.humidityPercent))
                     .monospacedDigit()
-                    .font(.system(size: overlay.humidityValueStyle.fontSize, weight: .medium, design: .rounded))
+                    .font(.system(
+                        size: overlay.humidityValueStyle.fontSize * renderScale,
+                        weight: .medium,
+                        design: .rounded
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.humidityValueStyle.hexColor))
             }
-            HStack(spacing: 7) {
+            HStack(spacing: OverlayDesign.badgeContentSpacing * renderScale) {
                 Image(systemName: "wind")
-                    .font(.system(size: overlay.windIconStyle.fontSize, weight: .medium))
+                    .font(.system(
+                        size: overlay.windIconStyle.fontSize * renderScale,
+                        weight: .medium
+                    ))
                     .foregroundStyle(Color(hexColor: overlay.windIconStyle.hexColor))
                 Text(
                     String(
@@ -1792,18 +1844,27 @@ private struct ManualWeatherBadge: View {
                     )
                 )
                 .monospacedDigit()
-                .font(.system(size: overlay.windValueStyle.fontSize, weight: .medium, design: .rounded))
+                .font(.system(
+                    size: overlay.windValueStyle.fontSize * renderScale,
+                    weight: .medium,
+                    design: .rounded
+                ))
                 .foregroundStyle(Color(hexColor: overlay.windValueStyle.hexColor))
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, OverlayDesign.badgeHorizontalPadding * renderScale)
+        .padding(.vertical, OverlayDesign.badgeVerticalPadding * renderScale)
         .background(backgroundColor)
         .overlay {
-            RoundedRectangle(cornerRadius: 5)
-                .stroke(isSelected ? Color.accentColor : .clear, lineWidth: 2)
+            RoundedRectangle(cornerRadius: OverlayDesign.badgeCornerRadius * renderScale)
+                .stroke(
+                    isSelected ? Color.accentColor : .clear,
+                    lineWidth: 2 * renderScale
+                )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(
+            cornerRadius: OverlayDesign.badgeCornerRadius * renderScale
+        ))
     }
 }
 
@@ -2217,40 +2278,6 @@ private struct OverlayTextStyleEditor: View {
     }
 }
 
-private func formattedActivityDate(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "zh_CN")
-    formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-    return formatter.string(from: date)
-}
-
-private func formattedActivityTime(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "zh_CN")
-    formatter.dateFormat = "HH:mm:ss"
-    return formatter.string(from: date)
-}
-
-private func formattedActivityDay(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "zh_CN")
-    formatter.dateFormat = "yyyy/MM/dd"
-    return formatter.string(from: date)
-}
-
-private func formattedActivityDuration(_ seconds: Double) -> String {
-    guard seconds.isFinite else {
-        return "00:00:00"
-    }
-    let totalSeconds = max(0, Int(seconds.rounded(.down)))
-    return String(
-        format: "%02d:%02d:%02d",
-        totalSeconds / 3_600,
-        (totalSeconds % 3_600) / 60,
-        totalSeconds % 60
-    )
-}
-
 private struct AssetRow: View {
     let title: String
     let subtitle: String
@@ -2315,89 +2342,6 @@ private struct EmptyMaterialRow: View {
             .font(.caption)
             .foregroundStyle(.secondary)
             .padding(.vertical, 8)
-    }
-}
-
-private enum OverlayExportResolution: String, CaseIterable, Identifiable {
-    case source
-    case fullHD
-    case twoK
-    case fourK
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .source: return "源视频"
-        case .fullHD: return "1080p"
-        case .twoK: return "2K"
-        case .fourK: return "4K"
-        }
-    }
-
-    private var shortEdgePixels: Double? {
-        switch self {
-        case .source: return nil
-        case .fullHD: return 1_080
-        case .twoK: return 1_440
-        case .fourK: return 2_160
-        }
-    }
-
-    func resolution(matching sourceResolution: CGSize) -> CGSize {
-        let sourceWidth = max(1, sourceResolution.width)
-        let sourceHeight = max(1, sourceResolution.height)
-        guard let shortEdgePixels else {
-            return CGSize(
-                width: evenDimension(sourceWidth),
-                height: evenDimension(sourceHeight)
-            )
-        }
-        let scale = shortEdgePixels / min(sourceWidth, sourceHeight)
-        return CGSize(
-            width: evenDimension(sourceWidth * scale),
-            height: evenDimension(sourceHeight * scale)
-        )
-    }
-
-    private func evenDimension(_ value: Double) -> Double {
-        Double(max(2, Int(value.rounded()) / 2 * 2))
-    }
-}
-
-private enum OverlayExportFrameRate: Int32, CaseIterable, Identifiable {
-    case fps30 = 30
-    case fps60 = 60
-
-    var id: Self { self }
-    var title: String { "\(rawValue) fps" }
-}
-
-private enum OverlayVideoEncoding {
-    static let keyFrameIntervalSeconds: Int32 = 5
-
-    static func averageBitRate(width: Int, height: Int, framesPerSecond: Int32) -> Int {
-        let pixelCount = max(1, width * height)
-        let frameRateFactor = sqrt(Double(framesPerSecond) / 30)
-        return max(
-            Int((1_000_000 * frameRateFactor).rounded()),
-            Int((Double(pixelCount) * 0.75 * frameRateFactor).rounded())
-        )
-    }
-
-    static func estimatedFileSize(
-        width: Int,
-        height: Int,
-        framesPerSecond: Int32,
-        duration: Double
-    ) -> Int64 {
-        let bitRate = averageBitRate(
-            width: width,
-            height: height,
-            framesPerSecond: framesPerSecond
-        )
-        let videoBytes = Double(bitRate) * max(0, duration) / 8
-        return Int64((videoBytes * 1.03).rounded())
     }
 }
 
@@ -2601,11 +2545,6 @@ private struct ExportInfoRow: View {
                 .lineLimit(2)
         }
     }
-}
-
-private func formattedExportDuration(_ seconds: Double) -> String {
-    let totalSeconds = max(0, Int(seconds.rounded(.down)))
-    return String(format: "%02d:%02d:%02d", totalSeconds / 3_600, (totalSeconds % 3_600) / 60, totalSeconds % 60)
 }
 
 private enum ExportStatus {
