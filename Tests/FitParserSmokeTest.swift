@@ -3,6 +3,10 @@ import Foundation
 @main
 struct FitParserSmokeTest {
     static func main() throws {
+        guard fitDate(0) == Date(timeIntervalSince1970: 631_065_600) else {
+            throw SmokeTestError.invalidFitEpochConversion
+        }
+
         let fileURL = URL(fileURLWithPath: CommandLine.arguments[1])
         let activity = try FitParser.parse(url: fileURL)
 
@@ -35,8 +39,14 @@ struct FitParserSmokeTest {
 
 private enum SmokeTestError: LocalizedError {
     case expectedActivityDataMissing
+    case invalidFitEpochConversion
 
     var errorDescription: String? {
-        "测试 FIT 文件缺少预期的跑步数据。"
+        switch self {
+        case .expectedActivityDataMissing:
+            return "测试 FIT 文件缺少预期的跑步数据。"
+        case .invalidFitEpochConversion:
+            return "FIT 时间戳基准转换错误。"
+        }
     }
 }

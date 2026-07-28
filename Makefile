@@ -1,4 +1,4 @@
-APP_PATH := build/RunningDataOverlay.app
+APP_PATH := build/Run Overlay.app
 
 .PHONY: build run test-fit clean
 
@@ -6,8 +6,8 @@ build:
 	./scripts/build.sh
 
 run: build
-	pkill -x RunningDataOverlay 2>/dev/null || true
-	open -n $(APP_PATH)
+	pkill -x "Run Overlay" 2>/dev/null || true
+	open "$(APP_PATH)"
 
 test-fit:
 	mkdir -p build

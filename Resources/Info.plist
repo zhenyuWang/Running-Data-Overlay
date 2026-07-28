@@ -5,15 +5,17 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Running Data Overlay</string>
+    <string>Run Overlay</string>
     <key>CFBundleExecutable</key>
-    <string>RunningDataOverlay</string>
+    <string>Run Overlay</string>
     <key>CFBundleIdentifier</key>
     <string>com.runningdataoverlay.app</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Running Data Overlay</string>
+    <string>Run Overlay</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -422,8 +422,8 @@ private func readFitUnsigned(_ bytes: [UInt8], at index: Int, count: Int, archit
     }
 }
 
-private func fitDate(_ timestamp: UInt32) -> Date {
-    Date(timeIntervalSinceReferenceDate: TimeInterval(timestamp) - 631_065_600)
+func fitDate(_ timestamp: UInt32) -> Date {
+    Date(timeIntervalSince1970: TimeInterval(timestamp) + 631_065_600)
 }
 
 private func average<T: BinaryInteger>(_ values: [T]) -> Double? {
