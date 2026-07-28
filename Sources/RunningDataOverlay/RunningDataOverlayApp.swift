@@ -1492,6 +1492,14 @@ private struct GPSRouteOverlay: View {
     let renderScale: CGFloat
     private let routeColor = Color(hexColor: OverlayDesign.gpsRouteHexColor)
 
+    private var gpsRenderScale: CGFloat {
+        OverlayDesign.gpsRenderScale(forComponentScale: renderScale)
+    }
+
+    private var renderedSize: CGSize {
+        OverlayDesign.gpsRenderedSize(forComponentScale: renderScale)
+    }
+
     var body: some View {
         GeometryReader { geometry in
             let layout = GPSRouteLayout(
@@ -1499,7 +1507,7 @@ private struct GPSRouteOverlay: View {
                 startDate: activity.startDate,
                 activityTime: activityTime,
                 size: geometry.size,
-                padding: Double(10 * renderScale)
+                padding: Double(10 * gpsRenderScale)
             )
 
             ZStack {
@@ -1507,7 +1515,7 @@ private struct GPSRouteOverlay: View {
                     .stroke(
                         routeColor,
                         style: StrokeStyle(
-                            lineWidth: 3 * renderScale,
+                            lineWidth: 3 * gpsRenderScale,
                             lineCap: .round,
                             lineJoin: .round
                         )
@@ -1515,14 +1523,17 @@ private struct GPSRouteOverlay: View {
 
                 if let currentPosition = layout.currentPosition {
                     Image(systemName: "location.north.fill")
-                        .font(.system(size: 13 * renderScale, weight: .bold))
+                        .font(.system(size: 13 * gpsRenderScale, weight: .bold))
                         .foregroundStyle(.red)
                         .rotationEffect(.degrees(layout.headingDegrees ?? 0))
                         .position(currentPosition)
                 }
             }
         }
-        .frame(width: 150 * renderScale, height: 190 * renderScale)
+        .frame(
+            width: renderedSize.width,
+            height: renderedSize.height
+        )
         .contentShape(Rectangle())
     }
 }

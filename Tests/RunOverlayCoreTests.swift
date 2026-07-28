@@ -136,11 +136,14 @@ struct OverlayDesignTests {
     @Test("All component default positions remain stable")
     func defaultPositions() {
         let expected: [OverlayComponentKind: OverlayPositionSpec] = [
-            .distance: OverlayPositionSpec(horizontal: 0.50, vertical: 0.07),
-            .pace: OverlayPositionSpec(horizontal: 0.06, vertical: 0.68),
-            .heartRate: OverlayPositionSpec(horizontal: 0.06, vertical: 0.745),
-            .cadence: OverlayPositionSpec(horizontal: 0.06, vertical: 0.81),
-            .strideLength: OverlayPositionSpec(horizontal: 0.06, vertical: 0.875),
+            .distance: OverlayPositionSpec(
+                horizontal: 0.50,
+                vertical: 0.07 + 10 / Double(OverlayDesign.canvasReferenceSize.height)
+            ),
+            .pace: OverlayPositionSpec(horizontal: 0.06, vertical: 0.756),
+            .heartRate: OverlayPositionSpec(horizontal: 0.06, vertical: 0.802),
+            .cadence: OverlayPositionSpec(horizontal: 0.06, vertical: 0.848),
+            .strideLength: OverlayPositionSpec(horizontal: 0.06, vertical: 0.894),
             .gpsTrack: OverlayPositionSpec(horizontal: 0.936, vertical: 0.25),
             .elapsedTime: OverlayPositionSpec(horizontal: 0.052, vertical: 0.94),
             .activityDateTime: OverlayPositionSpec(horizontal: 0.94, vertical: 0.922),
@@ -153,6 +156,25 @@ struct OverlayDesignTests {
         }
     }
 
+    @Test("Distance offset and lower-left component spacing remain exact")
+    func defaultPositionSpacing() {
+        let distance = OverlayDesign.defaultPosition(for: .distance)
+        let distanceOffsetPixels = (distance.vertical - 0.07)
+            * Double(OverlayDesign.canvasReferenceSize.height)
+        #expect(abs(distanceOffsetPixels - 10) < 0.000_001)
+
+        let lowerLeftComponents: [OverlayComponentKind] = [
+            .pace, .heartRate, .cadence, .strideLength, .elapsedTime
+        ]
+        let verticalPositions = lowerLeftComponents.map {
+            OverlayDesign.defaultPosition(for: $0).vertical
+        }
+        for pair in zip(verticalPositions, verticalPositions.dropFirst()) {
+            #expect(abs((pair.1 - pair.0) - 0.046) < 0.000_001)
+        }
+        #expect(verticalPositions.last == 0.94)
+    }
+
     @Test("Distance, GPS, weather, and badge style defaults remain stable")
     func styleDefaults() {
         #expect(OverlayDesign.distanceLength == 650)
@@ -162,6 +184,9 @@ struct OverlayDesignTests {
         #expect(OverlayDesign.distanceEndpointFontSize == 16)
         #expect(OverlayDesign.distanceCurrentFontSize == 18)
         #expect(OverlayDesign.gpsRouteHexColor == "#63E677")
+        #expect(OverlayDesign.gpsDefaultScale == 0.70)
+        #expect(OverlayDesign.gpsBaseSize == CGSize(width: 150, height: 190))
+        #expect(OverlayDesign.gpsRenderedSize(forComponentScale: 1) == CGSize(width: 105, height: 133))
         #expect(OverlayDesign.weatherIconHexColor == "#FFFFFF")
         #expect(OverlayDesign.badgeBackgroundOpacity == 0.5)
         #expect(OverlayDesign.canvasReferenceSize == CGSize(width: 1_064, height: 598))

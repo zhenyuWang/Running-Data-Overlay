@@ -36,6 +36,8 @@ enum OverlayDesign {
     static let distanceCurrentFontSize = 18.0
 
     static let gpsRouteHexColor = "#63E677"
+    static let gpsDefaultScale: CGFloat = 0.70
+    static let gpsBaseSize = CGSize(width: 150, height: 190)
     static let weatherIconHexColor = "#FFFFFF"
 
     static func defaultWindowSize(forAvailableScreenSize screenSize: CGSize) -> CGSize {
@@ -55,13 +57,29 @@ enum OverlayDesign {
         )
     }
 
+    static func gpsRenderScale(forComponentScale componentScale: CGFloat) -> CGFloat {
+        componentScale * gpsDefaultScale
+    }
+
+    static func gpsRenderedSize(forComponentScale componentScale: CGFloat) -> CGSize {
+        let scale = gpsRenderScale(forComponentScale: componentScale)
+        return CGSize(
+            width: gpsBaseSize.width * scale,
+            height: gpsBaseSize.height * scale
+        )
+    }
+
     static func defaultPosition(for component: OverlayComponentKind) -> OverlayPositionSpec {
         switch component {
-        case .distance: return OverlayPositionSpec(horizontal: 0.50, vertical: 0.07)
-        case .pace: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.68)
-        case .heartRate: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.745)
-        case .cadence: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.81)
-        case .strideLength: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.875)
+        case .distance:
+            return OverlayPositionSpec(
+                horizontal: 0.50,
+                vertical: 0.07 + 10 / Double(canvasReferenceSize.height)
+            )
+        case .pace: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.756)
+        case .heartRate: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.802)
+        case .cadence: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.848)
+        case .strideLength: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.894)
         case .gpsTrack: return OverlayPositionSpec(horizontal: 0.936, vertical: 0.25)
         case .elapsedTime: return OverlayPositionSpec(horizontal: 0.052, vertical: 0.94)
         case .activityDateTime: return OverlayPositionSpec(horizontal: 0.94, vertical: 0.922)
