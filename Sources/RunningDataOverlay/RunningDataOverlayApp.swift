@@ -1017,6 +1017,7 @@ private enum WeatherCondition: String, CaseIterable, Identifiable {
     case snowy
     case foggy
     case thunderstorm
+    case thundershowers
 
     var id: Self { self }
 
@@ -1029,6 +1030,7 @@ private enum WeatherCondition: String, CaseIterable, Identifiable {
         case .snowy: return "雪"
         case .foggy: return "雾"
         case .thunderstorm: return "雷雨"
+        case .thundershowers: return "雷阵雨"
         }
     }
 
@@ -1041,6 +1043,7 @@ private enum WeatherCondition: String, CaseIterable, Identifiable {
         case .snowy: return "cloud.snow.fill"
         case .foggy: return "cloud.fog.fill"
         case .thunderstorm: return "cloud.bolt.rain.fill"
+        case .thundershowers: return "cloud.bolt.rain.fill"
         }
     }
 }
