@@ -2529,14 +2529,20 @@ private struct ExportOverlaySheet: View {
 
             HStack {
                 Spacer()
-                Button {
-                    if let exportRange {
-                        export(exportRange)
+                if case .success = exportStatus {
+                    Button(action: dismiss.callAsFunction) {
+                        Label("关闭", systemImage: "xmark")
                     }
-                } label: {
-                    Label("导出浮层", systemImage: "square.and.arrow.up")
+                } else {
+                    Button {
+                        if let exportRange {
+                            export(exportRange)
+                        }
+                    } label: {
+                        Label("导出浮层", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(exportRange == nil || isExporting)
                 }
-                .disabled(exportRange == nil || isExporting)
             }
         }
         .padding(20)
@@ -2644,19 +2650,22 @@ private enum OverlayVideoExporter {
     ) async throws {
         let fileManager = FileManager.default
         try Task.checkCancellation()
-        if fileManager.fileExists(atPath: configuration.outputURL.path) {
-            try fileManager.removeItem(at: configuration.outputURL)
+        let temporaryURL = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mov")
+        if fileManager.fileExists(atPath: temporaryURL.path) {
+            try fileManager.removeItem(at: temporaryURL)
         }
 
-        let writer = try AVAssetWriter(outputURL: configuration.outputURL, fileType: .mov)
+        let writer = try AVAssetWriter(outputURL: temporaryURL, fileType: .mov)
         var didCompleteExport = false
         defer {
             if !didCompleteExport {
                 if writer.status == .writing {
                     writer.cancelWriting()
                 }
-                if fileManager.fileExists(atPath: configuration.outputURL.path) {
-                    try? fileManager.removeItem(at: configuration.outputURL)
+                if fileManager.fileExists(atPath: temporaryURL.path) {
+                    try? fileManager.removeItem(at: temporaryURL)
                 }
             }
         }
@@ -2763,6 +2772,11 @@ private enum OverlayVideoExporter {
         guard writer.status == .completed else {
             throw writer.error ?? ExportError.writingFailed
         }
+        if fileManager.fileExists(atPath: configuration.outputURL.path) {
+            try fileManager.removeItem(at: configuration.outputURL)
+        }
+        try fileManager.copyItem(at: temporaryURL, to: configuration.outputURL)
+        try fileManager.removeItem(at: temporaryURL)
         didCompleteExport = true
     }
 
