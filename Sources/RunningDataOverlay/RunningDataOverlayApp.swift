@@ -26,7 +26,7 @@ struct RunningDataOverlayApp: App {
 private struct ContentView: View {
     @StateObject private var playback = PlaybackController()
     @State private var videoImports: [VideoImport] = []
-    @State private var fitImports: [FitImport] = []
+    @State private var fitImport: FitImport?
     @State private var timelineOffsets: [UUID: Double] = [:]
     @State private var timelineTime = 0.0
     @State private var isTimelineScrubbing = false
@@ -38,10 +38,12 @@ private struct ContentView: View {
     @State private var complementaryImport: ComplementaryImport?
     @State private var isExportSheetPresented = false
     @State private var exportsCompleteDataLayer = false
+    @State private var exportScope = ExportScope.currentVideo
     @State private var exportResolution = OverlayExportResolution.fullHD
     @State private var exportFrameRate = OverlayExportFrameRate.fps30
     @State private var isExporting = false
     @State private var exportProgress = 0.0
+    @State private var exportProgressItems: [ExportProgressItem] = []
     @State private var exportStatus: ExportStatus?
     @State private var exportTask: Task<Void, Never>?
 
@@ -52,6 +54,7 @@ private struct ContentView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     exportStatus = nil
+                    exportProgressItems = []
                     isExportSheetPresented = true
                 } label: {
                     Label("导出", systemImage: "square.and.arrow.up")
@@ -61,12 +64,15 @@ private struct ContentView: View {
         }
         .sheet(isPresented: $isExportSheetPresented) {
             ExportOverlaySheet(
-                exportRange: exportRange,
+                currentExportRange: currentExportRange,
+                matchingExportRanges: matchingExportRanges,
                 exportsCompleteDataLayer: $exportsCompleteDataLayer,
+                exportScope: $exportScope,
                 exportResolution: $exportResolution,
                 exportFrameRate: $exportFrameRate,
                 isExporting: isExporting,
                 exportProgress: exportProgress,
+                exportProgressItems: exportProgressItems,
                 exportStatus: exportStatus,
                 export: startExport,
                 cancelExport: cancelExport
@@ -129,17 +135,17 @@ private struct ContentView: View {
                     OverlayCanvas(
                         overlays: $overlayComponents,
                         selectedOverlayID: $selectedOverlayID,
-                        activity: fitImports.last?.activity,
+                        activity: fitImport?.activity,
                         activityTime: timelineTime - fitTimelineOffset
                     )
                 }
                 .aspectRatio(16 / 9, contentMode: .fit)
                 .frame(maxWidth: .infinity)
 
-                if !videoImports.isEmpty || !fitImports.isEmpty {
+                if !videoImports.isEmpty || fitImport != nil {
                     TimelineEditor(
                         videos: videoImports,
-                        fitFiles: fitImports,
+                        fitFiles: fitImport.map { [$0] } ?? [],
                         playback: playback,
                         offsets: $timelineOffsets,
                         timelineTime: $timelineTime,
@@ -201,6 +207,7 @@ private struct ContentView: View {
                 Button(action: importFITFile) {
                     Label("导入运动文件", systemImage: "figure.run")
                 }
+                .disabled(fitImport != nil)
             }
 
             ScrollView {
@@ -230,23 +237,23 @@ private struct ContentView: View {
                     Divider()
 
                     MaterialSection(title: "运动文件", systemImage: "figure.run") {
-                        if fitImports.isEmpty {
-                            EmptyMaterialRow(text: "尚未导入运动文件")
+                        if let fitImport {
+                            AssetRow(
+                                title: fitImport.fileName,
+                                subtitle: "FIT · \(fitImport.fileSizeDescription)",
+                                systemImage: "figure.run",
+                                onDelete: { removeFITFile() }
+                            )
                         } else {
-                            ForEach(fitImports) { fitImport in
-                                AssetRow(
-                                    title: fitImport.fileName,
-                                    subtitle: "FIT · \(fitImport.fileSizeDescription)",
-                                    systemImage: "figure.run",
-                                    onDelete: { removeFITFile(fitImport) }
-                                )
-                            }
+                            EmptyMaterialRow(text: "尚未导入运动文件")
                         }
                     } footer: {
-                        Button(action: importFITFile) {
-                            Label("导入运动文件", systemImage: "plus")
+                        if fitImport == nil {
+                            Button(action: importFITFile) {
+                                Label("导入运动文件", systemImage: "plus")
+                            }
+                            .buttonStyle(.borderless)
                         }
-                        .buttonStyle(.borderless)
                     }
                 }
             }
@@ -289,7 +296,7 @@ private struct ContentView: View {
     }
 
     private var fitTimelineOffset: Double {
-        guard let fitImport = fitImports.last else {
+        guard let fitImport else {
             return 0
         }
         return timelineOffsets[fitImport.id, default: 0]
@@ -303,11 +310,26 @@ private struct ContentView: View {
         return videoImports.last
     }
 
-    private var exportRange: ExportOverlayRange? {
-        guard let video = exportVideo,
-              let videoDuration = video.duration,
+    private var currentExportRange: ExportOverlayRange? {
+        guard let exportVideo else {
+            return nil
+        }
+        return exportRange(for: exportVideo, exportsCompleteDataLayer: exportsCompleteDataLayer)
+    }
+
+    private var matchingExportRanges: [ExportOverlayRange] {
+        videoImports.compactMap {
+            exportRange(for: $0, exportsCompleteDataLayer: false)
+        }
+    }
+
+    private func exportRange(
+        for video: VideoImport,
+        exportsCompleteDataLayer: Bool
+    ) -> ExportOverlayRange? {
+        guard let videoDuration = video.duration,
               videoDuration > 0,
-              let fitImport = fitImports.last,
+              let fitImport,
               let fitDuration = fitDuration(for: fitImport) else {
             return nil
         }
@@ -332,6 +354,7 @@ private struct ContentView: View {
         }
 
         return ExportOverlayRange(
+            videoID: video.id,
             videoFileName: video.url.lastPathComponent,
             fitFileName: fitImport.fileName,
             resolution: video.resolution ?? CGSize(width: 1_920, height: 1_080),
@@ -350,53 +373,156 @@ private struct ContentView: View {
         return duration > 0 ? duration : nil
     }
 
-    private func startExport(_ exportRange: ExportOverlayRange) {
-        guard let fitImport = fitImports.last else {
+    private func startExport() {
+        guard let fitImport else {
             exportStatus = .failure("未找到可用于导出的 FIT 运动数据。")
             return
         }
 
-        let savePanel = NSSavePanel()
-        savePanel.title = "导出透明数据层"
-        savePanel.message = "导出包含 Alpha 通道的 HEVC 视频文件。"
-        savePanel.allowedContentTypes = [.quickTimeMovie]
-        let videoBaseName = (exportRange.videoFileName as NSString).deletingPathExtension
-        savePanel.nameFieldStringValue = "\(videoBaseName)-overlay.mov"
-        savePanel.canCreateDirectories = true
-
-        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else {
+        let exportRanges: [ExportOverlayRange]
+        switch exportScope {
+        case .currentVideo:
+            exportRanges = currentExportRange.map { [$0] } ?? []
+        case .allMatchingVideos:
+            exportRanges = matchingExportRanges
+        }
+        guard !exportRanges.isEmpty else {
+            exportStatus = .failure("没有与 FIT 运动数据在时间线上重叠的视频素材。")
             return
         }
 
-        let configuration = OverlayVideoExportConfiguration(
-            outputURL: outputURL,
-            resolution: exportRange.outputResolution(for: exportResolution),
-            framesPerSecond: exportFrameRate.rawValue,
-            timelineStart: exportRange.timelineStart,
-            duration: exportRange.duration,
-            fitTimelineOffset: fitTimelineOffset,
-            activity: fitImport.activity,
-            overlays: overlayComponents
-        )
+        let outputURLs: [URL]
+        if exportScope == .allMatchingVideos {
+            let panel = NSOpenPanel()
+            panel.title = "选择浮层导出文件夹"
+            panel.message = "每个匹配的视频素材将生成一个透明浮层视频。"
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.canCreateDirectories = true
+            guard panel.runModal() == .OK, let directoryURL = panel.url else {
+                return
+            }
+            outputURLs = batchOutputURLs(for: exportRanges, in: directoryURL)
+        } else {
+            guard let exportRange = exportRanges.first else {
+                return
+            }
+            let savePanel = NSSavePanel()
+            savePanel.title = "导出透明数据层"
+            savePanel.message = "导出包含 Alpha 通道的 HEVC 视频文件。"
+            savePanel.allowedContentTypes = [.quickTimeMovie]
+            let videoBaseName = (exportRange.videoFileName as NSString).deletingPathExtension
+            savePanel.nameFieldStringValue = "\(videoBaseName)-overlay.mov"
+            savePanel.canCreateDirectories = true
+            guard savePanel.runModal() == .OK, let outputURL = savePanel.url else {
+                return
+            }
+            outputURLs = [outputURL]
+        }
+
         isExporting = true
         exportProgress = 0
         exportStatus = nil
+        exportProgressItems = exportRanges.map {
+            ExportProgressItem(id: $0.videoID, videoFileName: $0.videoFileName)
+        }
 
         exportTask = Task { @MainActor in
             do {
-                try await OverlayVideoExporter.export(configuration) { progress in
-                    exportProgress = progress
+                var failedExports = 0
+                for (index, exportRange) in exportRanges.enumerated() {
+                    try Task.checkCancellation()
+                    updateExportProgress(for: exportRange.videoID, progress: 0, status: .exporting)
+                    let configuration = OverlayVideoExportConfiguration(
+                        outputURL: outputURLs[index],
+                        resolution: exportRange.outputResolution(for: exportResolution),
+                        framesPerSecond: exportFrameRate.rawValue,
+                        timelineStart: exportRange.timelineStart,
+                        duration: exportRange.duration,
+                        fitTimelineOffset: fitTimelineOffset,
+                        activity: fitImport.activity,
+                        overlays: overlayComponents
+                    )
+                    do {
+                        try await OverlayVideoExporter.export(configuration) { progress in
+                            updateExportProgress(
+                                for: exportRange.videoID,
+                                progress: progress,
+                                status: .exporting
+                            )
+                        }
+                        try Task.checkCancellation()
+                        updateExportProgress(for: exportRange.videoID, progress: 1, status: .success)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        failedExports += 1
+                        updateExportProgress(
+                            for: exportRange.videoID,
+                            progress: 1,
+                            status: .failure(error.localizedDescription)
+                        )
+                    }
                 }
                 try Task.checkCancellation()
                 exportProgress = 1
-                exportStatus = .success("已导出到 \(outputURL.lastPathComponent)")
+                exportStatus = failedExports == 0
+                    ? .success("已导出 \(exportRanges.count) 个透明数据层。")
+                    : .failure("已完成导出，其中 \(failedExports) 个视频素材失败。")
             } catch is CancellationError {
+                markPendingExportsCancelled()
                 exportStatus = .cancelled("已取消导出。")
             } catch {
                 exportStatus = .failure(error.localizedDescription)
             }
             isExporting = false
             exportTask = nil
+        }
+    }
+
+    private func batchOutputURLs(
+        for exportRanges: [ExportOverlayRange],
+        in directoryURL: URL
+    ) -> [URL] {
+        var reservedPaths = Set<String>()
+        return exportRanges.map { exportRange in
+            let baseName = (exportRange.videoFileName as NSString).deletingPathExtension
+            var suffix = 1
+            var outputURL: URL
+            repeat {
+                let name = suffix == 1 ? "\(baseName)-overlay.mov" : "\(baseName)-overlay-\(suffix).mov"
+                outputURL = directoryURL.appendingPathComponent(name)
+                suffix += 1
+            } while reservedPaths.contains(outputURL.path)
+                || FileManager.default.fileExists(atPath: outputURL.path)
+            reservedPaths.insert(outputURL.path)
+            return outputURL
+        }
+    }
+
+    private func updateExportProgress(
+        for videoID: UUID,
+        progress: Double,
+        status: ExportProgressItem.Status
+    ) {
+        guard let index = exportProgressItems.firstIndex(where: { $0.id == videoID }) else {
+            return
+        }
+        exportProgressItems[index].progress = progress
+        exportProgressItems[index].status = status
+        exportProgress = exportProgressItems.map(\.progress).reduce(0, +)
+            / Double(max(exportProgressItems.count, 1))
+    }
+
+    private func markPendingExportsCancelled() {
+        for index in exportProgressItems.indices {
+            switch exportProgressItems[index].status {
+            case .waiting, .exporting:
+                exportProgressItems[index].status = .cancelled
+            case .success, .failure, .cancelled:
+                break
+            }
         }
     }
 
@@ -427,43 +553,43 @@ private struct ContentView: View {
         for video in imports {
             loadVideoDuration(for: video)
         }
-        if !imports.isEmpty, !fitImports.isEmpty {
+        if !imports.isEmpty, fitImport != nil {
             autoAlignUsingFileDates()
         }
-        if !imports.isEmpty, fitImports.isEmpty {
+        if !imports.isEmpty, fitImport == nil {
             complementaryImport = .workoutFile
         }
     }
 
     private func importFITFile() {
+        guard fitImport == nil else {
+            importError = "当前项目仅支持导入一个 FIT 运动文件。"
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = "选择 FIT 跑步记录"
         panel.message = "选择 Garmin、Coros 等设备导出的 .fit 文件。"
         panel.allowedContentTypes = [.fit]
-        panel.allowsMultipleSelection = true
+        panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
 
         guard panel.runModal() == .OK else {
             return
         }
 
-        var importedCount = 0
-        var errors: [String] = []
-        for url in panel.urls {
-            do {
-                fitImports.append(try FitImport(url: url))
-                importedCount += 1
-            } catch {
-                errors.append("\(url.lastPathComponent)：\(error.localizedDescription)")
-            }
+        guard let url = panel.url else {
+            return
         }
-        if !errors.isEmpty {
-            importError = errors.joined(separator: "\n")
+        do {
+            fitImport = try FitImport(url: url)
+        } catch {
+            importError = "\(url.lastPathComponent)：\(error.localizedDescription)"
+            return
         }
-        if importedCount > 0, !videoImports.isEmpty {
+        if !videoImports.isEmpty {
             autoAlignUsingFileDates()
         }
-        if importedCount > 0, videoImports.isEmpty {
+        if videoImports.isEmpty {
             complementaryImport = .video
         }
     }
@@ -509,17 +635,20 @@ private struct ContentView: View {
         }
     }
 
-    private func removeFITFile(_ fitImport: FitImport) {
-        fitImports.removeAll { $0.id == fitImport.id }
+    private func removeFITFile() {
+        guard let fitImport else {
+            return
+        }
         timelineOffsets.removeValue(forKey: fitImport.id)
+        self.fitImport = nil
     }
 
     private func autoAlignUsingFileDates() {
         let datedAssets = videoImports.compactMap { video in
             video.fileCreationDate.map { (video.id, $0) }
-        } + fitImports.compactMap { fitImport in
-            (fitImport.activity.startDate ?? fitImport.fileCreationDate).map { (fitImport.id, $0) }
-        }
+        } + (fitImport.flatMap { fitImport in
+            (fitImport.activity.startDate ?? fitImport.fileCreationDate).map { [(fitImport.id, $0)] }
+        } ?? [])
 
         guard let earliestDate = datedAssets.map(\.1).min() else {
             alignmentStatus = "缺少文件创建时间，无法自动对齐。"
@@ -629,6 +758,20 @@ private enum ComplementaryImport {
             return "导入视频"
         case .workoutFile:
             return "导入运动文件"
+        }
+    }
+}
+
+private enum ExportScope: String, CaseIterable, Identifiable {
+    case currentVideo
+    case allMatchingVideos
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .currentVideo: return "当前视频"
+        case .allMatchingVideos: return "所有匹配视频"
         }
     }
 }
@@ -2360,6 +2503,7 @@ private struct EmptyMaterialRow: View {
 }
 
 private struct ExportOverlayRange {
+    let videoID: UUID
     let videoFileName: String
     let fitFileName: String
     let resolution: CGSize
@@ -2410,14 +2554,17 @@ private struct ExportOverlayRange {
 }
 
 private struct ExportOverlaySheet: View {
-    let exportRange: ExportOverlayRange?
+    let currentExportRange: ExportOverlayRange?
+    let matchingExportRanges: [ExportOverlayRange]
     @Binding var exportsCompleteDataLayer: Bool
+    @Binding var exportScope: ExportScope
     @Binding var exportResolution: OverlayExportResolution
     @Binding var exportFrameRate: OverlayExportFrameRate
     let isExporting: Bool
     let exportProgress: Double
+    let exportProgressItems: [ExportProgressItem]
     let exportStatus: ExportStatus?
-    let export: (ExportOverlayRange) -> Void
+    let export: () -> Void
     let cancelExport: () -> Void
     @Environment(\.dismiss) private var dismiss
 
@@ -2435,8 +2582,22 @@ private struct ExportOverlaySheet: View {
                 .disabled(isExporting)
             }
 
-            Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("导出范围")
+                    .font(.subheadline.weight(.semibold))
+                Picker("导出范围", selection: $exportScope) {
+                    ForEach(ExportScope.allCases) { scope in
+                        Text(scope.title).tag(scope)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
                 .disabled(isExporting)
+            }
+
+            Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
+                .disabled(isExporting || exportScope == .allMatchingVideos)
+                .opacity(exportScope == .allMatchingVideos ? 0.5 : 1)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("分辨率")
@@ -2464,7 +2625,11 @@ private struct ExportOverlaySheet: View {
                 .disabled(isExporting)
             }
 
-            if let exportRange {
+            if exportScope == .allMatchingVideos {
+                Text("将导出 \(matchingExportRanges.count) 个与 FIT 数据在时间线上重叠的视频浮层。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let exportRange = currentExportRange {
                 Text(
                     exportRange.exportsCompleteDataLayer
                         ? "导出 FIT 对应的完整数据层。"
@@ -2507,7 +2672,7 @@ private struct ExportOverlaySheet: View {
                 }
             }
 
-            if isExporting {
+            if isExporting || !exportProgressItems.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     ProgressView(value: exportProgress) {
                         Text("正在导出透明数据层")
@@ -2515,8 +2680,19 @@ private struct ExportOverlaySheet: View {
                         Text("\(Int((exportProgress * 100).rounded()))%")
                     }
 
-                    Button(role: .cancel, action: cancelExport) {
-                        Label("取消导出", systemImage: "xmark.circle")
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(exportProgressItems) { item in
+                                ExportProgressRow(item: item)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 150)
+
+                    if isExporting {
+                        Button(role: .cancel, action: cancelExport) {
+                            Label("取消导出", systemImage: "xmark.circle")
+                        }
                     }
                 }
             } else if let exportStatus {
@@ -2534,20 +2710,84 @@ private struct ExportOverlaySheet: View {
                         Label("关闭", systemImage: "xmark")
                     }
                 } else {
-                    Button {
-                        if let exportRange {
-                            export(exportRange)
-                        }
-                    } label: {
+                    Button(action: export) {
                         Label("导出浮层", systemImage: "square.and.arrow.up")
                     }
-                    .disabled(exportRange == nil || isExporting)
+                    .disabled(!canExport || isExporting)
                 }
             }
         }
         .padding(20)
         .frame(width: 440, alignment: .topLeading)
         .frame(minHeight: 300, alignment: .topLeading)
+    }
+
+    private var canExport: Bool {
+        switch exportScope {
+        case .currentVideo:
+            currentExportRange != nil
+        case .allMatchingVideos:
+            !matchingExportRanges.isEmpty
+        }
+    }
+}
+
+private struct ExportProgressItem: Identifiable {
+    enum Status: Equatable {
+        case waiting
+        case exporting
+        case success
+        case failure(String)
+        case cancelled
+
+        var title: String {
+            switch self {
+            case .waiting: return "等待中"
+            case .exporting: return "导出中"
+            case .success: return "已完成"
+            case .failure: return "失败"
+            case .cancelled: return "已取消"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .waiting: return .secondary
+            case .exporting: return .accentColor
+            case .success: return .green
+            case .failure: return .red
+            case .cancelled: return .secondary
+            }
+        }
+    }
+
+    let id: UUID
+    let videoFileName: String
+    var progress = 0.0
+    var status: Status = .waiting
+}
+
+private struct ExportProgressRow: View {
+    let item: ExportProgressItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(item.videoFileName)
+                    .lineLimit(1)
+                Spacer()
+                Text(item.status.title)
+                    .foregroundStyle(item.status.color)
+            }
+            .font(.caption)
+            ProgressView(value: item.progress)
+            if case let .failure(message) = item.status {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+        }
     }
 }
 
