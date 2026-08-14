@@ -70,6 +70,43 @@ struct FitActivityTests {
         }
     }
 
+    @Test("Movement timer excludes paused intervals")
+    func movementTimer() {
+        let activity = FitActivity(
+            startDate: startDate,
+            endDate: startDate.addingTimeInterval(120),
+            totalDistanceMeters: nil,
+            averageSpeedMetersPerSecond: nil,
+            averageHeartRate: nil,
+            averageCadence: nil,
+            averageStrideLengthMeters: nil,
+            gpsPoints: [],
+            averageTemperatureCelsius: nil,
+            samples: [],
+            totalTimerTimeSeconds: 90,
+            timerIntervals: [
+                FitTimerInterval(
+                    startDate: startDate,
+                    endDate: startDate.addingTimeInterval(60)
+                ),
+                FitTimerInterval(
+                    startDate: startDate.addingTimeInterval(90),
+                    endDate: startDate.addingTimeInterval(120)
+                )
+            ]
+        )
+
+        #expect(activity.timerElapsedTime(at: 45) == 45)
+        #expect(activity.timerElapsedTime(at: 75) == 60)
+        #expect(activity.timerElapsedTime(at: 100) == 70)
+        #expect(activity.timerElapsedTime(at: 120) == 90)
+        #expect(activity.timerResumeDates == [startDate.addingTimeInterval(90)])
+        #expect(activity.isTimerRunning(at: 45))
+        #expect(!activity.isTimerRunning(at: 75))
+        #expect(activity.isTimerRunning(at: 100))
+        #expect(!activity.isTimerRunning(at: 120))
+    }
+
     private func sample(
         offset: TimeInterval,
         heartRate: Int? = nil,
@@ -295,6 +332,162 @@ struct DistanceOverlayTests {
         #expect(result.kilometerTickProgresses.count == 2)
         #expect(result.kilometerTickProgresses[0] == 0)
         #expect(abs(result.kilometerTickProgresses[1] - 0.621_371) < 0.000_001)
+    }
+}
+
+@Suite("Timeline coordinate mapping")
+struct TimelineLayoutTests {
+    @Test("Ruler, clip start, and playhead line share one timeline coordinate")
+    func coordinateAlignment() {
+        let time = 125.0
+        let pixelsPerSecond = 0.4
+        let timelineX = TimelineLayout.timelineX(
+            time: time,
+            pixelsPerSecond: pixelsPerSecond
+        )
+        let clipX = TimelineLayout.trackLeadingInset + TimelineLayout.clipOffsetX(
+            startTime: time,
+            pixelsPerSecond: pixelsPerSecond
+        )
+        let playheadX = TimelineLayout.playheadLineX(
+            time: time,
+            pixelsPerSecond: pixelsPerSecond
+        )
+
+        #expect(timelineX == clipX)
+        #expect(timelineX == playheadX)
+        #expect(TimelineLayout.clipWidth(
+            duration: 60,
+            pixelsPerSecond: pixelsPerSecond
+        ) == 24)
+    }
+
+    @Test("Video range includes its exact start and excludes its end")
+    func videoRangeBoundaries() {
+        #expect(!TimelineLayout.contains(time: 9.999, start: 10, duration: 60))
+        #expect(TimelineLayout.contains(time: 10, start: 10, duration: 60))
+        #expect(TimelineLayout.contains(time: 69.999, start: 10, duration: 60))
+        #expect(!TimelineLayout.contains(time: 70, start: 10, duration: 60))
+        #expect(TimelineLayout.mediaTime(timelineTime: 10, start: 10) == 0)
+    }
+
+    @Test("Visible provisional clips and playback hit testing use the same duration")
+    func provisionalDuration() {
+        #expect(TimelineLayout.videoDuration(
+            importedDuration: nil,
+            loadedDuration: nil
+        ) == 60)
+        #expect(TimelineLayout.videoDuration(
+            importedDuration: nil,
+            loadedDuration: 90
+        ) == 90)
+        #expect(TimelineLayout.videoDuration(
+            importedDuration: 120,
+            loadedDuration: 90
+        ) == 120)
+    }
+
+    @Test("Playhead drag conversion is exact and clamped")
+    func playheadDragConversion() {
+        #expect(TimelineLayout.draggedTime(
+            startTime: 10,
+            translation: 20,
+            pixelsPerSecond: 2,
+            totalDuration: 100
+        ) == 20)
+        #expect(TimelineLayout.draggedTime(
+            startTime: 10,
+            translation: -40,
+            pixelsPerSecond: 2,
+            totalDuration: 100
+        ) == 0)
+        #expect(TimelineLayout.draggedTime(
+            startTime: 90,
+            translation: 40,
+            pixelsPerSecond: 2,
+            totalDuration: 100
+        ) == 100)
+    }
+}
+
+@Suite("Timeline date alignment")
+struct TimelineAlignmentTests {
+    @Test("Attached first video is calibrated to the nearby FIT resume")
+    func attachedAssetDates() throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let fitStart = try #require(formatter.date(from: "2026-08-05T05:46:23+08:00"))
+        let videoStart = try #require(formatter.date(from: "2026-08-05T05:54:11+08:00"))
+        let timerResume = try #require(formatter.date(from: "2026-08-05T05:53:21+08:00"))
+        let correction = TimelineAlignment.videoClockCorrection(
+            firstVideoDate: videoStart,
+            timerResumeDates: [timerResume]
+        )
+        let offsets = try #require(TimelineAlignment.normalizedOffsets(
+            for: [fitStart, videoStart.addingTimeInterval(correction)]
+        ))
+
+        #expect(correction == -50)
+        #expect(offsets == [0, 418])
+        #expect(TimelineAlignment.canAutomaticallyAlign(offsets: offsets))
+
+        let activityTime = TimelineAlignment.activityTime(
+            timelineTime: offsets[1],
+            fitTimelineOffset: offsets[0]
+        )
+        #expect(fitStart.addingTimeInterval(activityTime) == timerResume)
+        #expect(TimelineAlignment.isSequentialCameraFirstFile(
+            "VID_20260805_055411_00_001.mp4"
+        ))
+        #expect(!TimelineAlignment.isSequentialCameraFirstFile(
+            "VID_20260805_060537_00_002.mp4"
+        ))
+        #expect(TimelineAlignment.sequentialCameraBatchPrefix(
+            "VID_20260805_060537_00_002.mp4"
+        ) == "vid_20260805_")
+        #expect(TimelineAlignment.sequentialCameraBatchPrefix(
+            "unrelated.mp4"
+        ) == nil)
+    }
+
+    @Test("Sequential camera batches keep the first-file anchor instead of the later copy time")
+    func sequentialCameraBatchAnchor() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let firstFileDate = base.addingTimeInterval(90)
+        let laterFileDate = base.addingTimeInterval(270)
+
+        let alignedDate = TimelineAlignment.alignmentReferenceDate(
+            fileCreationDate: laterFileDate,
+            sequentialCameraBatchReferenceDate: firstFileDate
+        )
+
+        #expect(alignedDate == firstFileDate)
+    }
+
+    @Test("FIT start is used as the timeline anchor when a file is created earlier")
+    func fitStartAnchor() {
+        let fitStart = Date(timeIntervalSince1970: 1_700_000_000)
+        let earlierVideo = fitStart.addingTimeInterval(-30)
+
+        let offsets = TimelineAlignment.relativeOffsets(
+            from: fitStart,
+            for: [earlierVideo, fitStart]
+        )
+
+        #expect(offsets == [0, 0])
+    }
+
+    @Test("Automatic alignment rejects spans over twelve hours")
+    func automaticAlignmentLimit() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let offsets = try #require(TimelineAlignment.normalizedOffsets(for: [
+            start.addingTimeInterval(13 * 60 * 60),
+            start
+        ]))
+
+        #expect(offsets == [13 * 60 * 60.0, 0])
+        #expect(!TimelineAlignment.canAutomaticallyAlign(offsets: offsets))
+        #expect(TimelineAlignment.normalizedOffsets(for: []) == nil)
     }
 }
 

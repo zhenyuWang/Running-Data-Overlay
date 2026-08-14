@@ -31,6 +31,7 @@ private struct ContentView: View {
     @State private var timelineTime = 0.0
     @State private var isTimelineScrubbing = false
     @State private var alignmentStatus: String?
+    @State private var keyboardMonitor: Any?
     @State private var sidebarTab = SidebarTab.materials
     @State private var overlayComponents: [OverlayComponentInstance] = []
     @State private var selectedOverlayID: UUID?
@@ -107,7 +108,11 @@ private struct ContentView: View {
         } message: { importType in
             Text(importType.message)
         }
+        .onAppear {
+            installKeyboardMonitor()
+        }
         .onDisappear {
+            removeKeyboardMonitor()
             playback.pause()
         }
         .onChange(of: playback.currentTime) { _, currentTime in
@@ -116,8 +121,29 @@ private struct ContentView: View {
                 return
             }
 
-                timelineTime = timelineOffsets[currentVideo.id, default: 0] + currentTime
+            timelineTime = timelineOffsets[currentVideo.id, default: 0] + currentTime
         }
+    }
+
+    private func installKeyboardMonitor() {
+        removeKeyboardMonitor()
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak playback] event in
+            guard let playback else {
+                return event
+            }
+            guard event.keyCode == 49, !event.isARepeat else {
+                return event
+            }
+            playback.togglePlayback()
+            return nil
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        if let keyboardMonitor {
+            NSEvent.removeMonitor(keyboardMonitor)
+        }
+        self.keyboardMonitor = nil
     }
 
     private var content: some View {
@@ -136,7 +162,10 @@ private struct ContentView: View {
                         overlays: $overlayComponents,
                         selectedOverlayID: $selectedOverlayID,
                         activity: fitImport?.activity,
-                        activityTime: timelineTime - fitTimelineOffset
+                        activityTime: TimelineAlignment.activityTime(
+                            timelineTime: timelineTime,
+                            fitTimelineOffset: fitTimelineOffset
+                        )
                     )
                 }
                 .aspectRatio(16 / 9, contentMode: .fit)
@@ -151,7 +180,7 @@ private struct ContentView: View {
                         timelineTime: $timelineTime,
                         alignmentStatus: alignmentStatus,
                         autoAlign: autoAlignUsingFileDates,
-                        previewTimeline: { timelineTime = $0 },
+                        previewTimeline: { seekTimeline(to: $0) },
                         setTimelineScrubbing: setTimelineScrubbing,
                         seekTimeline: seekTimeline
                     )
@@ -644,21 +673,47 @@ private struct ContentView: View {
     }
 
     private func autoAlignUsingFileDates() {
-        let datedAssets = videoImports.compactMap { video in
-            video.fileCreationDate.map { (video.id, $0) }
-        } + (fitImport.flatMap { fitImport in
-            (fitImport.activity.startDate ?? fitImport.fileCreationDate).map { [(fitImport.id, $0)] }
-        } ?? [])
+        let videoClockCorrection: Double = {
+            guard let fitImport,
+                  let firstVideoDate = videoImports
+                    .compactMap(\.sequentialCameraBatchReferenceDate)
+                    .min() else {
+                return 0
+            }
+            return TimelineAlignment.videoClockCorrection(
+                firstVideoDate: firstVideoDate,
+                timerResumeDates: fitImport.activity.timerResumeDates
+            )
+        }()
 
-        guard let earliestDate = datedAssets.map(\.1).min() else {
+        let videoAssetDates: [(UUID, Date)] = videoImports.compactMap { video in
+            guard let referenceDate = TimelineAlignment.alignmentReferenceDate(
+                fileCreationDate: video.fileCreationDate,
+                sequentialCameraBatchReferenceDate: video.sequentialCameraBatchReferenceDate
+            ) else {
+                return nil
+            }
+            return (video.id, referenceDate.addingTimeInterval(videoClockCorrection))
+        }
+
+        let fitAssetDates: [(UUID, Date)] = fitImport.flatMap { fitImport in
+            (fitImport.activity.startDate ?? fitImport.fileCreationDate).map { [(fitImport.id, $0)] }
+        } ?? []
+
+        let datedAssets: [(UUID, Date)] = videoAssetDates + fitAssetDates
+        let datedAssetDates = datedAssets.map { $0.1 }
+
+        let anchorDate: Date? = fitImport?.activity.startDate ?? fitImport?.fileCreationDate ?? datedAssetDates.min()
+        guard let anchorDate else {
             alignmentStatus = "缺少文件创建时间，无法自动对齐。"
             return
         }
 
-        let largestOffset = datedAssets
-            .map { $0.1.timeIntervalSince(earliestDate) }
-            .max() ?? 0
-        guard largestOffset <= 12 * 60 * 60 else {
+        let alignedOffsets = datedAssetDates.map { date in
+            max(0, date.timeIntervalSince(anchorDate))
+        }
+
+        guard TimelineAlignment.canAutomaticallyAlign(offsets: alignedOffsets) else {
             for (id, _) in datedAssets {
                 timelineOffsets[id] = 0
             }
@@ -667,10 +722,17 @@ private struct ContentView: View {
             return
         }
 
-        for (id, creationDate) in datedAssets {
-            timelineOffsets[id] = max(0, creationDate.timeIntervalSince(earliestDate))
+        for ((id, _), offset) in zip(datedAssets, alignedOffsets) {
+            timelineOffsets[id] = offset
         }
-        alignmentStatus = "已按视频创建时间和 FIT 运动开始时间对齐，可拖动素材微调。"
+        if videoClockCorrection != 0 {
+            alignmentStatus = String(
+                format: "已根据 FIT 恢复点校准相机时间 %.0f 秒，可拖动素材微调。",
+                videoClockCorrection
+            )
+        } else {
+            alignmentStatus = "已按视频创建时间和 FIT 运动开始时间对齐，可拖动素材微调。"
+        }
     }
 
     private func seekTimeline(to time: Double) {
@@ -678,13 +740,20 @@ private struct ContentView: View {
         guard let video = videoImports.first(where: { video in
             let offset = timelineOffsets[video.id, default: 0]
             let duration = timelineVideoDuration(for: video)
-            return duration > 0 && timelineTime >= offset && timelineTime < offset + duration
+            return TimelineLayout.contains(
+                time: timelineTime,
+                start: offset,
+                duration: duration
+            )
         }) else {
             playback.unloadVideo()
             return
         }
 
-        let videoTime = timelineTime - timelineOffsets[video.id, default: 0]
+        let videoTime = TimelineLayout.mediaTime(
+            timelineTime: timelineTime,
+            start: timelineOffsets[video.id, default: 0]
+        )
         if playback.videoURL == video.url {
             playback.seek(to: videoTime)
         } else {
@@ -693,10 +762,10 @@ private struct ContentView: View {
     }
 
     private func timelineVideoDuration(for video: VideoImport) -> Double {
-        if let duration = video.duration {
-            return duration
-        }
-        return playback.videoURL == video.url ? playback.duration : 0
+        TimelineLayout.videoDuration(
+            importedDuration: video.duration,
+            loadedDuration: playback.videoURL == video.url ? playback.duration : nil
+        )
     }
 
     private func setTimelineScrubbing(_ isScrubbing: Bool) {
@@ -898,6 +967,9 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
         case .gpsTrack:
             return activity.gpsPoints.isEmpty ? "FIT 未记录" : "\(activity.gpsPoints.count) 个定位点"
         case .elapsedTime:
+            if let totalTimerTimeSeconds = activity.totalTimerTimeSeconds {
+                return formattedActivityDuration(totalTimerTimeSeconds)
+            }
             guard let startDate = activity.startDate, let endDate = activity.endDate else { return "FIT 未记录" }
             return formattedActivityDuration(endDate.timeIntervalSince(startDate))
         case .activityDateTime:
@@ -923,6 +995,9 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
             }
             return String(format: "%.2f km", distance / 1_000)
         case .pace:
+            guard activity.isTimerRunning(at: activityTime) else {
+                return unit == .pacePerMile ? "--:-- /mi" : "--:-- /km"
+            }
             guard let speed = sample?.speedMetersPerSecond ?? activity.averageSpeedMetersPerSecond, speed > 0 else { return title }
             let multiplier = unit == .pacePerMile ? 1_609.344 : 1_000
             let paceSeconds = Int((multiplier / speed).rounded())
@@ -974,6 +1049,12 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
             }
             return OverlayDisplayValue(value: String(format: "%.2f", distance / 1_000), unit: "km")
         case .pace:
+            guard activity.isTimerRunning(at: activityTime) else {
+                return OverlayDisplayValue(
+                    value: "--:--",
+                    unit: unit == .pacePerMile ? "/mi" : "/km"
+                )
+            }
             guard let speed = sample?.speedMetersPerSecond ?? activity.averageSpeedMetersPerSecond, speed > 0 else {
                 return OverlayDisplayValue(value: title, unit: "")
             }
@@ -1039,11 +1120,7 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
     }
 
     private func elapsedTime(in activity: FitActivity, at activityTime: Double) -> Double {
-        let elapsed = max(0, activityTime)
-        guard let startDate = activity.startDate, let endDate = activity.endDate else {
-            return elapsed
-        }
-        return min(elapsed, max(0, endDate.timeIntervalSince(startDate)))
+        activity.timerElapsedTime(at: activityTime)
     }
 }
 
@@ -2072,13 +2149,42 @@ private struct OverlayComponentAddMenu: View {
     }
 }
 
+private struct CompactScrollView<Content: View>: NSViewRepresentable {
+    let content: () -> Content
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+
+        let hostingView = NSHostingView(rootView: content())
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = hostingView
+        return scrollView
+    }
+
+    func updateNSView(_ nsView: NSScrollView, context: Context) {
+        if let hostingView = nsView.documentView as? NSHostingView<Content> {
+            hostingView.rootView = content()
+        } else {
+            let hostingView = NSHostingView(rootView: content())
+            hostingView.translatesAutoresizingMaskIntoConstraints = false
+            nsView.documentView = hostingView
+        }
+    }
+}
+
 private struct OverlayInspector: View {
     @Binding var overlay: OverlayComponentInstance
     let addComponent: (OverlayComponent) -> Void
     let delete: () -> Void
 
     var body: some View {
-        ScrollView {
+        CompactScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     Label(overlay.component.title, systemImage: overlay.component.systemImage)
@@ -2136,6 +2242,7 @@ private struct OverlayInspector: View {
                 Spacer()
             }
         }
+        .frame(maxHeight: .infinity)
     }
 }
 
@@ -2569,157 +2676,160 @@ private struct ExportOverlaySheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Label("导出透明数据层", systemImage: "square.and.arrow.up")
-                    .font(.headline)
-                Spacer()
-                Button(action: dismiss.callAsFunction) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.borderless)
-                .help("关闭")
-                .disabled(isExporting)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("导出范围")
-                    .font(.subheadline.weight(.semibold))
-                Picker("导出范围", selection: $exportScope) {
-                    ForEach(ExportScope.allCases) { scope in
-                        Text(scope.title).tag(scope)
+        CompactScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack {
+                    Label("导出透明数据层", systemImage: "square.and.arrow.up")
+                        .font(.headline)
+                    Spacer()
+                    Button(action: dismiss.callAsFunction) {
+                        Image(systemName: "xmark")
                     }
+                    .buttonStyle(.borderless)
+                    .help("关闭")
+                    .disabled(isExporting)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(isExporting)
-            }
 
-            Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
-                .disabled(isExporting || exportScope == .allMatchingVideos)
-                .opacity(exportScope == .allMatchingVideos ? 0.5 : 1)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("分辨率")
-                    .font(.subheadline.weight(.semibold))
-                Picker("分辨率", selection: $exportResolution) {
-                    ForEach(OverlayExportResolution.allCases) { resolution in
-                        Text(resolution.title).tag(resolution)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(isExporting)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("帧率")
-                    .font(.subheadline.weight(.semibold))
-                Picker("帧率", selection: $exportFrameRate) {
-                    ForEach(OverlayExportFrameRate.allCases) { frameRate in
-                        Text(frameRate.title).tag(frameRate)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(isExporting)
-            }
-
-            if exportScope == .allMatchingVideos {
-                Text("将导出 \(matchingExportRanges.count) 个与 FIT 数据在时间线上重叠的视频浮层。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if let exportRange = currentExportRange {
-                Text(
-                    exportRange.exportsCompleteDataLayer
-                        ? "导出 FIT 对应的完整数据层。"
-                        : "仅导出视频素材与 FIT 数据重叠的部分。"
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Divider()
-
-                ExportInfoRow(title: "源视频分辨率", value: exportRange.sourceResolutionDescription)
-                ExportInfoRow(
-                    title: "导出分辨率",
-                    value: exportRange.outputResolutionDescription(for: exportResolution)
-                )
-                ExportInfoRow(title: "导出帧率", value: exportFrameRate.title)
-                ExportInfoRow(title: "时长", value: exportRange.durationDescription)
-                ExportInfoRow(title: "时间线范围", value: exportRange.timelineRangeDescription)
-                ExportInfoRow(
-                    title: "预计大小",
-                    value: exportRange.estimatedFileSizeDescription(
-                        resolution: exportResolution,
-                        frameRate: exportFrameRate
-                    )
-                )
-                ExportInfoRow(title: "视频素材", value: exportRange.videoFileName)
-                ExportInfoRow(title: "运动文件", value: exportRange.fitFileName)
-
-                Text("预计大小基于针对透明数据层优化的 HEVC Alpha 码率，实际结果会随图层复杂度变化。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("暂时无法计算导出范围")
+                    Text("导出范围")
                         .font(.subheadline.weight(.semibold))
-                    Text("请导入包含有效时长的视频和 FIT 运动文件，并在时间线上让两者重叠；或者勾选“导出完整数据层”以导出 FIT 的完整范围。")
+                    Picker("导出范围", selection: $exportScope) {
+                        ForEach(ExportScope.allCases) { scope in
+                            Text(scope.title).tag(scope)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(isExporting)
+                }
+
+                Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
+                    .disabled(isExporting || exportScope == .allMatchingVideos)
+                    .opacity(exportScope == .allMatchingVideos ? 0.5 : 1)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("分辨率")
+                        .font(.subheadline.weight(.semibold))
+                    Picker("分辨率", selection: $exportResolution) {
+                        ForEach(OverlayExportResolution.allCases) { resolution in
+                            Text(resolution.title).tag(resolution)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(isExporting)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("帧率")
+                        .font(.subheadline.weight(.semibold))
+                    Picker("帧率", selection: $exportFrameRate) {
+                        ForEach(OverlayExportFrameRate.allCases) { frameRate in
+                            Text(frameRate.title).tag(frameRate)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(isExporting)
+                }
+
+                if exportScope == .allMatchingVideos {
+                    Text("将导出 \(matchingExportRanges.count) 个与 FIT 数据在时间线上重叠的视频浮层。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+                } else if let exportRange = currentExportRange {
+                    Text(
+                        exportRange.exportsCompleteDataLayer
+                            ? "导出 FIT 对应的完整数据层。"
+                            : "仅导出视频素材与 FIT 数据重叠的部分。"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
-            if isExporting || !exportProgressItems.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    ProgressView(value: exportProgress) {
-                        Text("正在导出透明数据层")
-                    } currentValueLabel: {
-                        Text("\(Int((exportProgress * 100).rounded()))%")
+                    Divider()
+
+                    ExportInfoRow(title: "源视频分辨率", value: exportRange.sourceResolutionDescription)
+                    ExportInfoRow(
+                        title: "导出分辨率",
+                        value: exportRange.outputResolutionDescription(for: exportResolution)
+                    )
+                    ExportInfoRow(title: "导出帧率", value: exportFrameRate.title)
+                    ExportInfoRow(title: "时长", value: exportRange.durationDescription)
+                    ExportInfoRow(title: "时间线范围", value: exportRange.timelineRangeDescription)
+                    ExportInfoRow(
+                        title: "预计大小",
+                        value: exportRange.estimatedFileSizeDescription(
+                            resolution: exportResolution,
+                            frameRate: exportFrameRate
+                        )
+                    )
+                    ExportInfoRow(title: "视频素材", value: exportRange.videoFileName)
+                    ExportInfoRow(title: "运动文件", value: exportRange.fitFileName)
+
+                    Text("预计大小基于针对透明数据层优化的 HEVC Alpha 码率，实际结果会随图层复杂度变化。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("暂时无法计算导出范围")
+                            .font(.subheadline.weight(.semibold))
+                        Text("请导入包含有效时长的视频和 FIT 运动文件，并在时间线上让两者重叠；或者勾选“导出完整数据层”以导出 FIT 的完整范围。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                }
 
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(exportProgressItems) { item in
-                                ExportProgressRow(item: item)
+                if isExporting || !exportProgressItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ProgressView(value: exportProgress) {
+                            Text("正在导出透明数据层")
+                        } currentValueLabel: {
+                            Text("\(Int((exportProgress * 100).rounded()))%")
+                        }
+
+                        CompactScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(exportProgressItems) { item in
+                                    ExportProgressRow(item: item)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 150)
+
+                        if isExporting {
+                            Button(role: .cancel, action: cancelExport) {
+                                Label("取消导出", systemImage: "xmark.circle")
                             }
                         }
                     }
-                    .frame(maxHeight: 150)
+                } else if let exportStatus {
+                    Text(exportStatus.message)
+                        .font(.caption)
+                        .foregroundStyle(exportStatus.color)
+                }
 
-                    if isExporting {
-                        Button(role: .cancel, action: cancelExport) {
-                            Label("取消导出", systemImage: "xmark.circle")
+                Spacer(minLength: 0)
+
+                HStack {
+                    Spacer()
+                    if case .success = exportStatus {
+                        Button(action: dismiss.callAsFunction) {
+                            Label("关闭", systemImage: "xmark")
                         }
+                    } else {
+                        Button(action: export) {
+                            Label("导出浮层", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(!canExport || isExporting)
                     }
                 }
-            } else if let exportStatus {
-                Text(exportStatus.message)
-                    .font(.caption)
-                    .foregroundStyle(exportStatus.color)
             }
-
-            Spacer(minLength: 0)
-
-            HStack {
-                Spacer()
-                if case .success = exportStatus {
-                    Button(action: dismiss.callAsFunction) {
-                        Label("关闭", systemImage: "xmark")
-                    }
-                } else {
-                    Button(action: export) {
-                        Label("导出浮层", systemImage: "square.and.arrow.up")
-                    }
-                    .disabled(!canExport || isExporting)
-                }
-            }
+            .padding(20)
+            .frame(width: 440, alignment: .topLeading)
+            .frame(minHeight: 300, alignment: .topLeading)
         }
-        .padding(20)
-        .frame(width: 440, alignment: .topLeading)
-        .frame(minHeight: 300, alignment: .topLeading)
+        .frame(maxHeight: 520)
     }
 
     private var canExport: Bool {
@@ -3089,6 +3199,33 @@ private struct VideoImport: Identifiable {
         self.url = url
         fileCreationDate = try? url.resourceValues(forKeys: [.creationDateKey]).creationDate
     }
+
+    var sequentialCameraBatchReferenceDate: Date? {
+        let fileName = url.lastPathComponent
+        guard let batchPrefix = TimelineAlignment.sequentialCameraBatchPrefix(fileName) else {
+            return nil
+        }
+        if TimelineAlignment.isSequentialCameraFirstFile(fileName) {
+            return fileCreationDate
+        }
+
+        let directory = url.deletingLastPathComponent()
+        guard let siblingURLs = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        return siblingURLs.compactMap { siblingURL -> Date? in
+            let siblingName = siblingURL.lastPathComponent
+            guard TimelineAlignment.sequentialCameraBatchPrefix(siblingName) == batchPrefix,
+                  TimelineAlignment.isSequentialCameraFirstFile(siblingName) else {
+                return nil
+            }
+            return try? siblingURL.resourceValues(forKeys: [.creationDateKey]).creationDate
+        }.min()
+    }
 }
 
 private struct PlayerView: NSViewRepresentable {
@@ -3191,8 +3328,8 @@ private struct TimelineEditor: View {
 
     @State private var zoomScale = 1.0
     @State private var timelineScrollOffset = 0.0
-    private let trackLeadingInset = 76.0
-    private let trackTrailingInset = 72.0
+    private let trackLeadingInset = TimelineLayout.trackLeadingInset
+    private let trackTrailingInset = TimelineLayout.trackTrailingInset
 
     private var totalDuration: Double {
         let videoEnd = videos.map { offsets[$0.id, default: 0] + videoDuration(for: $0) }.max() ?? 0
@@ -3211,6 +3348,7 @@ private struct TimelineEditor: View {
                 title: video.url.lastPathComponent,
                 duration: videoDuration(for: video),
                 kind: .video,
+                url: video.url,
                 onSelect: { playback.loadVideo(url: video.url) }
             )
         }
@@ -3223,6 +3361,7 @@ private struct TimelineEditor: View {
                 title: fitFile.fileName,
                 duration: workoutDuration(for: fitFile),
                 kind: .workout,
+                url: nil,
                 onSelect: {}
             )
         }
@@ -3271,7 +3410,17 @@ private struct TimelineEditor: View {
                                     clips: videoClips(pixelsPerSecond: pixelsPerSecond),
                                     offsets: $offsets,
                                     width: timelineWidth,
-                                    pixelsPerSecond: pixelsPerSecond
+                                    pixelsPerSecond: pixelsPerSecond,
+                                    onOffsetCommitted: { clip, previousOffset, newOffset in
+                                        guard playback.videoURL == clip.url else {
+                                            return
+                                        }
+                                        let preservedVideoTime = max(0, timelineTime - newOffset)
+                                        playback.seek(to: preservedVideoTime)
+                                        if previousOffset != newOffset {
+                                            timelineTime = newOffset + preservedVideoTime
+                                        }
+                                    }
                                 )
                                 TimelineTrack(
                                     title: "运动",
@@ -3279,7 +3428,8 @@ private struct TimelineEditor: View {
                                     clips: workoutClips(pixelsPerSecond: pixelsPerSecond),
                                     offsets: $offsets,
                                     width: timelineWidth,
-                                    pixelsPerSecond: pixelsPerSecond
+                                    pixelsPerSecond: pixelsPerSecond,
+                                    onOffsetCommitted: { _, _, _ in }
                                 )
                             }
 
@@ -3287,12 +3437,14 @@ private struct TimelineEditor: View {
                                 time: $timelineTime,
                                 totalDuration: totalDuration,
                                 pixelsPerSecond: pixelsPerSecond,
-                                trackLeadingInset: trackLeadingInset,
                                 preview: previewTimeline,
                                 setScrubbing: setTimelineScrubbing,
                                 seek: seekTimeline
                             )
-                                .offset(x: trackLeadingInset + timelineTime * pixelsPerSecond)
+                                .offset(x: TimelineLayout.playheadViewOffsetX(
+                                    time: timelineTime,
+                                    pixelsPerSecond: pixelsPerSecond
+                                ))
                         }
                         .coordinateSpace(name: "timeline")
                         .padding(.vertical, 4)
@@ -3315,7 +3467,7 @@ private struct TimelineEditor: View {
                         contentWidth: timelineContentWidth,
                         offset: $timelineScrollOffset
                     )
-                    .frame(width: geometry.size.width, height: 10)
+                    .frame(width: geometry.size.width, height: 14)
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
             }
@@ -3326,10 +3478,10 @@ private struct TimelineEditor: View {
     }
 
     private func videoDuration(for video: VideoImport) -> Double {
-        if let duration = video.duration {
-            return duration
-        }
-        return playback.videoURL == video.url && playback.duration > 0 ? playback.duration : 60
+        TimelineLayout.videoDuration(
+            importedDuration: video.duration,
+            loadedDuration: playback.videoURL == video.url ? playback.duration : nil
+        )
     }
 
     private func workoutDuration(for fitFile: FitImport) -> Double {
@@ -3361,10 +3513,10 @@ private struct TimelineHorizontalScrollbar: View {
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(Color.primary.opacity(0.14))
-                    .frame(height: 6)
+                    .frame(height: 8)
                 Capsule()
                     .fill(Color.secondary.opacity(maximumOffset > 0 ? 0.8 : 0.3))
-                    .frame(width: thumbWidth, height: 6)
+                    .frame(width: thumbWidth, height: 8)
                     .offset(x: thumbX)
             }
             .contentShape(Rectangle())
@@ -3437,6 +3589,7 @@ private struct TimelineClip: Identifiable {
     let title: String
     let duration: Double
     let kind: TimelineClipKind
+    let url: URL?
     let onSelect: () -> Void
 }
 
@@ -3447,7 +3600,10 @@ private struct TimelineRuler: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            Color.clear.frame(width: 76 + timelineWidth, height: 22)
+            Color.clear.frame(
+                width: TimelineLayout.trackLeadingInset + timelineWidth,
+                height: 22
+            )
             ForEach(0...Int(ceil(totalDuration / 60)), id: \.self) { minute in
                 VStack(alignment: .leading, spacing: 2) {
                     if minute.isMultiple(of: 10) {
@@ -3461,7 +3617,10 @@ private struct TimelineRuler: View {
                         .fill(Color.secondary.opacity(minute.isMultiple(of: 10) ? 0.7 : 0.3))
                         .frame(width: 1, height: minute.isMultiple(of: 10) ? 8 : 4)
                 }
-                .offset(x: 76 + Double(minute) * 60 * pixelsPerSecond)
+                .offset(x: TimelineLayout.timelineX(
+                    time: Double(minute) * 60,
+                    pixelsPerSecond: pixelsPerSecond
+                ))
             }
         }
     }
@@ -3474,12 +3633,13 @@ private struct TimelineTrack: View {
     @Binding var offsets: [UUID: Double]
     let width: Double
     let pixelsPerSecond: Double
+    let onOffsetCommitted: ((TimelineClip, Double, Double) -> Void)?
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: TimelineLayout.trackLabelSpacing) {
             Label(title, systemImage: systemImage)
                 .font(.caption.weight(.medium))
-                .frame(width: 68, alignment: .leading)
+                .frame(width: TimelineLayout.trackLabelWidth, alignment: .leading)
 
             ZStack(alignment: .leading) {
                 RoundedRectangle(cornerRadius: 4)
@@ -3493,7 +3653,10 @@ private struct TimelineTrack: View {
                             get: { offsets[clip.id, default: 0] },
                             set: { offsets[clip.id] = $0 }
                         ),
-                        pixelsPerSecond: pixelsPerSecond
+                        pixelsPerSecond: pixelsPerSecond,
+                        onOffsetCommitted: { previousOffset, newOffset in
+                            onOffsetCommitted?(clip, previousOffset, newOffset)
+                        }
                     )
                 }
             }
@@ -3507,6 +3670,7 @@ private struct TimelineClipView: View {
     @Binding var offsetSeconds: Double
     @State private var dragOrigin: Double?
     let pixelsPerSecond: Double
+    let onOffsetCommitted: ((Double, Double) -> Void)?
 
     var body: some View {
         Label(clip.title, systemImage: clip.kind == .video ? "video.fill" : "figure.run")
@@ -3517,7 +3681,10 @@ private struct TimelineClipView: View {
             .background(clip.kind.color.opacity(0.75))
             .foregroundStyle(.white)
             .clipShape(RoundedRectangle(cornerRadius: 4))
-            .offset(x: offsetSeconds * pixelsPerSecond + 4)
+            .offset(x: TimelineLayout.clipOffsetX(
+                startTime: offsetSeconds,
+                pixelsPerSecond: pixelsPerSecond
+            ))
             .onTapGesture(perform: clip.onSelect)
             .gesture(
                 DragGesture(minimumDistance: 2)
@@ -3528,14 +3695,20 @@ private struct TimelineClipView: View {
                         offsetSeconds = max(0, (dragOrigin ?? 0) + Double(value.translation.width) / pixelsPerSecond)
                     }
                     .onEnded { _ in
+                        let previousOffset = dragOrigin ?? offsetSeconds
+                        let newOffset = offsetSeconds
                         dragOrigin = nil
+                        onOffsetCommitted?(previousOffset, newOffset)
                     }
             )
             .help("拖动以调整相对时间位置")
     }
 
     private var clipWidth: Double {
-        max(clip.duration * pixelsPerSecond, 48)
+        TimelineLayout.clipWidth(
+            duration: clip.duration,
+            pixelsPerSecond: pixelsPerSecond
+        )
     }
 }
 
@@ -3543,7 +3716,6 @@ private struct TimelinePlayhead: View {
     @Binding var time: Double
     let totalDuration: Double
     let pixelsPerSecond: Double
-    let trackLeadingInset: CGFloat
     let preview: (Double) -> Void
     let setScrubbing: (Bool) -> Void
     let seek: (Double) -> Void
@@ -3560,7 +3732,7 @@ private struct TimelinePlayhead: View {
                 .fill(Color.red)
                 .frame(width: 2, height: 140)
         }
-        .frame(width: 18)
+        .frame(width: TimelineLayout.playheadWidth)
         .contentShape(Rectangle())
         .gesture(
             DragGesture(minimumDistance: 0, coordinateSpace: .named("timeline"))
@@ -3572,17 +3744,28 @@ private struct TimelinePlayhead: View {
                         setScrubbing(true)
                     }
                     let translation = value.location.x - (dragStartLocationX ?? value.location.x)
-                    let target = min(
-                        max(0, (dragStartTime ?? time) + Double(translation) / pixelsPerSecond),
-                        totalDuration
+                    let target = TimelineLayout.draggedTime(
+                        startTime: dragStartTime ?? time,
+                        translation: Double(translation),
+                        pixelsPerSecond: pixelsPerSecond,
+                        totalDuration: totalDuration
                     )
                     preview(target)
                 }
-                .onEnded { _ in
+                .onEnded { value in
+                    let translation = value.location.x
+                        - (dragStartLocationX ?? value.location.x)
+                    let target = TimelineLayout.draggedTime(
+                        startTime: dragStartTime ?? time,
+                        translation: Double(translation),
+                        pixelsPerSecond: pixelsPerSecond,
+                        totalDuration: totalDuration
+                    )
+                    preview(target)
+                    seek(target)
                     isDragging = false
                     dragStartLocationX = nil
                     dragStartTime = nil
-                    seek(time)
                     setScrubbing(false)
                 }
         )
@@ -3607,8 +3790,21 @@ private final class PlaybackController: ObservableObject {
 
     private var isScrubbing = false
     private var timeObserver: Any?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
+        player.publisher(for: \.rate)
+            .sink { [weak self] _ in
+                self?.syncPlayingState()
+            }
+            .store(in: &cancellables)
+
+        player.publisher(for: \.timeControlStatus)
+            .sink { [weak self] _ in
+                self?.syncPlayingState()
+            }
+            .store(in: &cancellables)
+
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.05, preferredTimescale: 600),
             queue: .main
@@ -3618,6 +3814,8 @@ private final class PlaybackController: ObservableObject {
                 self?.updateCurrentTime(seconds)
             }
         }
+
+        syncPlayingState()
     }
 
     deinit {
@@ -3677,7 +3875,7 @@ private final class PlaybackController: ObservableObject {
     }
 
     func togglePlayback() {
-        if isPlaying {
+        if player.timeControlStatus == .playing || player.rate != 0 {
             pause()
             return
         }
@@ -3686,12 +3884,12 @@ private final class PlaybackController: ObservableObject {
             seek(to: 0)
         }
         player.play()
-        isPlaying = true
+        syncPlayingState()
     }
 
     func pause() {
         player.pause()
-        isPlaying = false
+        syncPlayingState()
     }
 
     func skip(by seconds: Double) {
@@ -3699,13 +3897,17 @@ private final class PlaybackController: ObservableObject {
     }
 
     func seek(to seconds: Double) {
-        let target = min(max(seconds, 0), duration)
+        let nonnegativeTarget = max(seconds, 0)
+        let target = duration > 0
+            ? min(nonnegativeTarget, duration)
+            : nonnegativeTarget
         currentTime = target
         player.seek(
             to: CMTime(seconds: target, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
         )
+        syncPlayingState()
     }
 
     func setScrubbing(_ isScrubbing: Bool) {
@@ -3724,8 +3926,14 @@ private final class PlaybackController: ObservableObject {
 
         currentTime = max(0, seconds)
         if duration > 0, currentTime >= duration {
-            isPlaying = false
+            player.pause()
         }
+        syncPlayingState()
+    }
+
+    private func syncPlayingState() {
+        let playing = player.timeControlStatus == .playing || (player.rate != 0 && player.timeControlStatus != .paused)
+        isPlaying = playing
     }
 
     private func formatTime(_ time: Double) -> String {

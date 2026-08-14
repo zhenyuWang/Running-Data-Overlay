@@ -11,6 +11,36 @@ struct FitActivity {
     let gpsPoints: [FitGPSPoint]
     let averageTemperatureCelsius: Double?
     let samples: [FitDataPoint]
+    let totalTimerTimeSeconds: Double?
+    let timerIntervals: [FitTimerInterval]
+
+    init(
+        startDate: Date?,
+        endDate: Date?,
+        totalDistanceMeters: Double?,
+        averageSpeedMetersPerSecond: Double?,
+        averageHeartRate: Int?,
+        averageCadence: Int?,
+        averageStrideLengthMeters: Double?,
+        gpsPoints: [FitGPSPoint],
+        averageTemperatureCelsius: Double?,
+        samples: [FitDataPoint],
+        totalTimerTimeSeconds: Double? = nil,
+        timerIntervals: [FitTimerInterval] = []
+    ) {
+        self.startDate = startDate
+        self.endDate = endDate
+        self.totalDistanceMeters = totalDistanceMeters
+        self.averageSpeedMetersPerSecond = averageSpeedMetersPerSecond
+        self.averageHeartRate = averageHeartRate
+        self.averageCadence = averageCadence
+        self.averageStrideLengthMeters = averageStrideLengthMeters
+        self.gpsPoints = gpsPoints
+        self.averageTemperatureCelsius = averageTemperatureCelsius
+        self.samples = samples
+        self.totalTimerTimeSeconds = totalTimerTimeSeconds
+        self.timerIntervals = timerIntervals
+    }
 
     var weatherSummary: String {
         guard let averageTemperatureCelsius else {
@@ -50,6 +80,54 @@ struct FitActivity {
         }
         return speed * 60 / Double(cadence)
     }
+
+    func timerElapsedTime(at elapsedSeconds: Double) -> Double {
+        let elapsed = max(0, elapsedSeconds)
+        guard let startDate else {
+            return elapsed
+        }
+
+        let targetDate = startDate.addingTimeInterval(elapsed)
+        if let endDate, targetDate >= endDate, let totalTimerTimeSeconds {
+            return totalTimerTimeSeconds
+        }
+        guard !timerIntervals.isEmpty else {
+            if let endDate {
+                return min(elapsed, max(0, endDate.timeIntervalSince(startDate)))
+            }
+            return elapsed
+        }
+
+        return timerIntervals.reduce(0) { total, interval in
+            guard targetDate > interval.startDate else {
+                return total
+            }
+            let effectiveEnd = min(targetDate, interval.endDate)
+            return total + max(0, effectiveEnd.timeIntervalSince(interval.startDate))
+        }
+    }
+
+    var timerResumeDates: [Date] {
+        Array(timerIntervals.dropFirst().map(\.startDate))
+    }
+
+    func isTimerRunning(at elapsedSeconds: Double) -> Bool {
+        guard let startDate else {
+            return true
+        }
+        let targetDate = startDate.addingTimeInterval(max(0, elapsedSeconds))
+        guard !timerIntervals.isEmpty else {
+            return endDate.map { targetDate < $0 } ?? true
+        }
+        return timerIntervals.contains {
+            targetDate >= $0.startDate && targetDate < $0.endDate
+        }
+    }
+}
+
+struct FitTimerInterval: Equatable {
+    let startDate: Date
+    let endDate: Date
 }
 
 struct FitDataPoint {
@@ -114,6 +192,7 @@ private struct FitBinaryParser {
     var lastTimestamp: UInt32?
     var records: [FitRecord] = []
     var session: FitSession?
+    var timerEvents: [FitTimerEvent] = []
 
     init(bytes: [UInt8], dataStart: Int, dataEnd: Int) {
         self.bytes = bytes
@@ -217,6 +296,10 @@ private struct FitBinaryParser {
         switch definition.globalMessageNumber {
         case 20:
             records.append(FitRecord(values: values, timestamp: timestamp))
+        case 21:
+            if let event = FitTimerEvent(values: values, timestamp: timestamp) {
+                timerEvents.append(event)
+            }
         case 18:
             session = FitSession(values: values, timestamp: timestamp)
         default:
@@ -268,8 +351,40 @@ private struct FitBinaryParser {
             averageStrideLengthMeters: calculateAverageStrideLength(),
             gpsPoints: gpsPoints,
             averageTemperatureCelsius: average(records.compactMap(\.temperatureCelsius)),
-            samples: samples
+            samples: samples,
+            totalTimerTimeSeconds: session?.totalTimerTimeSeconds,
+            timerIntervals: makeTimerIntervals(startDate: startDate, endDate: endDate)
         )
+    }
+
+    private func makeTimerIntervals(startDate: Date?, endDate: Date?) -> [FitTimerInterval] {
+        let sortedEvents = timerEvents.sorted { $0.timestamp < $1.timestamp }
+        guard !sortedEvents.isEmpty else {
+            return []
+        }
+
+        var intervals: [FitTimerInterval] = []
+        var runningStart: Date?
+        for event in sortedEvents {
+            let eventDate = fitDate(event.timestamp)
+            switch event.type {
+            case .start:
+                if runningStart == nil {
+                    runningStart = eventDate
+                }
+            case .stop:
+                let intervalStart = runningStart ?? startDate
+                if let intervalStart, eventDate > intervalStart {
+                    intervals.append(FitTimerInterval(startDate: intervalStart, endDate: eventDate))
+                }
+                runningStart = nil
+            }
+        }
+
+        if let runningStart, let endDate, endDate > runningStart {
+            intervals.append(FitTimerInterval(startDate: runningStart, endDate: endDate))
+        }
+        return intervals
     }
 
     private func calculateAverageStrideLength() -> Double? {
@@ -351,6 +466,7 @@ private struct FitSession {
     let averageSpeedMetersPerSecond: Double?
     let averageHeartRate: Int?
     let averageCadence: Int?
+    let totalTimerTimeSeconds: Double?
 
     init(values: [UInt8: Double], timestamp: UInt32?) {
         self.timestamp = timestamp
@@ -359,6 +475,33 @@ private struct FitSession {
         averageSpeedMetersPerSecond = values[14].map { $0 / 1_000 }
         averageHeartRate = values[16].map { Int($0) }
         averageCadence = values[18].map { Int($0) * 2 }
+        totalTimerTimeSeconds = values[8].map { $0 / 1_000 }
+    }
+}
+
+private struct FitTimerEvent {
+    enum EventType {
+        case start
+        case stop
+    }
+
+    let timestamp: UInt32
+    let type: EventType
+
+    init?(values: [UInt8: Double], timestamp: UInt32?) {
+        guard values[0].map(Int.init) == 0, let timestamp,
+              let rawType = values[1].map(Int.init) else {
+            return nil
+        }
+        self.timestamp = timestamp
+        switch rawType {
+        case 0:
+            type = .start
+        case 1, 4, 8, 9:
+            type = .stop
+        default:
+            return nil
+        }
     }
 }
 

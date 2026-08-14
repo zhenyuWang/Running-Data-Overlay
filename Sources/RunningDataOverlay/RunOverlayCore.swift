@@ -234,6 +234,129 @@ struct DistanceProgressCalculation: Equatable, Sendable {
     }
 }
 
+enum TimelineLayout {
+    static let trackLabelWidth = 68.0
+    static let trackLabelSpacing = 8.0
+    static let trackLeadingInset = trackLabelWidth + trackLabelSpacing
+    static let trackTrailingInset = 72.0
+    static let playheadWidth = 18.0
+    static let provisionalVideoDuration = 60.0
+
+    static func videoDuration(importedDuration: Double?, loadedDuration: Double?) -> Double {
+        if let importedDuration, importedDuration.isFinite, importedDuration > 0 {
+            return importedDuration
+        }
+        if let loadedDuration, loadedDuration.isFinite, loadedDuration > 0 {
+            return loadedDuration
+        }
+        return provisionalVideoDuration
+    }
+
+    static func contains(time: Double, start: Double, duration: Double) -> Bool {
+        duration > 0 && time >= start && time < start + duration
+    }
+
+    static func mediaTime(timelineTime: Double, start: Double) -> Double {
+        max(0, timelineTime - start)
+    }
+
+    static func timelineX(time: Double, pixelsPerSecond: Double) -> Double {
+        trackLeadingInset + time * pixelsPerSecond
+    }
+
+    static func clipOffsetX(startTime: Double, pixelsPerSecond: Double) -> Double {
+        startTime * pixelsPerSecond
+    }
+
+    static func clipWidth(duration: Double, pixelsPerSecond: Double) -> Double {
+        max(1, duration * pixelsPerSecond)
+    }
+
+    static func playheadViewOffsetX(time: Double, pixelsPerSecond: Double) -> Double {
+        timelineX(time: time, pixelsPerSecond: pixelsPerSecond) - playheadWidth / 2
+    }
+
+    static func playheadLineX(time: Double, pixelsPerSecond: Double) -> Double {
+        playheadViewOffsetX(time: time, pixelsPerSecond: pixelsPerSecond) + playheadWidth / 2
+    }
+
+    static func draggedTime(
+        startTime: Double,
+        translation: Double,
+        pixelsPerSecond: Double,
+        totalDuration: Double
+    ) -> Double {
+        guard pixelsPerSecond > 0 else {
+            return min(max(0, startTime), totalDuration)
+        }
+        return min(
+            max(0, startTime + translation / pixelsPerSecond),
+            totalDuration
+        )
+    }
+}
+
+enum TimelineAlignment {
+    static let maximumAutomaticSpan = 12 * 60 * 60.0
+    static let maximumResumeCalibrationDelay = 90.0
+
+    static func normalizedOffsets(for dates: [Date]) -> [Double]? {
+        guard let earliestDate = dates.min() else {
+            return nil
+        }
+        return dates.map { max(0, $0.timeIntervalSince(earliestDate)) }
+    }
+
+    static func relativeOffsets(from anchorDate: Date, for dates: [Date]) -> [Double] {
+        dates.map { max(0, $0.timeIntervalSince(anchorDate)) }
+    }
+
+    static func canAutomaticallyAlign(offsets: [Double]) -> Bool {
+        (offsets.max() ?? 0) <= maximumAutomaticSpan
+    }
+
+    static func activityTime(timelineTime: Double, fitTimelineOffset: Double) -> Double {
+        timelineTime - fitTimelineOffset
+    }
+
+    static func alignmentReferenceDate(
+        fileCreationDate: Date?,
+        sequentialCameraBatchReferenceDate: Date?
+    ) -> Date? {
+        sequentialCameraBatchReferenceDate ?? fileCreationDate
+    }
+
+    static func videoClockCorrection(
+        firstVideoDate: Date,
+        timerResumeDates: [Date]
+    ) -> Double {
+        let nearbyResume = timerResumeDates
+            .filter {
+                let delay = firstVideoDate.timeIntervalSince($0)
+                return delay >= 0 && delay <= maximumResumeCalibrationDelay
+            }
+            .max()
+        return nearbyResume?.timeIntervalSince(firstVideoDate) ?? 0
+    }
+
+    static func isSequentialCameraFirstFile(_ fileName: String) -> Bool {
+        fileName.range(
+            of: #"^VID_\d{8}_\d{6}_00_001\.mp4$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
+    static func sequentialCameraBatchPrefix(_ fileName: String) -> String? {
+        guard fileName.range(
+            of: #"^VID_\d{8}_\d{6}_00_\d{3}\.mp4$"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil else {
+            return nil
+        }
+        return String(fileName.prefix(13)).lowercased()
+    }
+}
+
 func formattedActivityDate(
     _ date: Date,
     timeZone: TimeZone = .current
