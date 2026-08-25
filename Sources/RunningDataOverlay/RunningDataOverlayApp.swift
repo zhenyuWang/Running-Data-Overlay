@@ -673,18 +673,20 @@ private struct ContentView: View {
     }
 
     private func autoAlignUsingFileDates() {
-        let videoClockCorrection: Double = {
+        let videoAlignmentEstimate: (correction: Double, confidence: AlignmentConfidence) = {
             guard let fitImport,
                   let firstVideoDate = videoImports
                     .compactMap(\.sequentialCameraBatchReferenceDate)
                     .min() else {
-                return 0
+                return (0, .low)
             }
             return TimelineAlignment.videoClockCorrection(
                 firstVideoDate: firstVideoDate,
                 timerResumeDates: fitImport.activity.timerResumeDates
             )
         }()
+        let videoClockCorrection = videoAlignmentEstimate.correction
+        let videoAlignmentConfidence = videoAlignmentEstimate.confidence
 
         let videoAssetDates: [(UUID, Date)] = videoImports.compactMap { video in
             guard let referenceDate = TimelineAlignment.alignmentReferenceDate(
@@ -726,18 +728,35 @@ private struct ContentView: View {
             timelineOffsets[id] = offset
         }
         if videoClockCorrection != 0 {
-            alignmentStatus = String(
-                format: "已根据 FIT 恢复点校准相机时间 %.0f 秒，可拖动素材微调。",
-                videoClockCorrection
-            )
+            let message: String
+            switch videoAlignmentConfidence {
+            case .high:
+                message = String(
+                    format: "已根据 FIT 恢复点校准相机时间 %.0f 秒，可拖动素材微调。",
+                    videoClockCorrection
+                )
+            case .medium:
+                message = String(
+                    format: "已根据 FIT 恢复点估算相机时间 %.0f 秒，建议手动微调。",
+                    videoClockCorrection
+                )
+            case .low:
+                message = "已按文件时间做了保守对齐，建议手动微调。"
+            }
+            alignmentStatus = message
         } else {
-            alignmentStatus = "已按视频创建时间和 FIT 运动开始时间对齐，可拖动素材微调。"
+            if videoAlignmentConfidence == .low {
+                alignmentStatus = "已按视频创建时间和 FIT 运动开始时间对齐，可拖动素材微调。"
+            } else {
+                alignmentStatus = "已按视频创建时间和 FIT 运动开始时间对齐，可拖动素材微调。"
+            }
         }
     }
 
     private func seekTimeline(to time: Double) {
         timelineTime = max(0, time)
-        guard let video = videoImports.first(where: { video in
+
+        if let video = videoImports.first(where: { video in
             let offset = timelineOffsets[video.id, default: 0]
             let duration = timelineVideoDuration(for: video)
             return TimelineLayout.contains(
@@ -745,19 +764,31 @@ private struct ContentView: View {
                 start: offset,
                 duration: duration
             )
-        }) else {
-            playback.unloadVideo()
+        }) {
+            let videoTime = TimelineLayout.mediaTime(
+                timelineTime: timelineTime,
+                start: timelineOffsets[video.id, default: 0]
+            )
+            if playback.videoURL == video.url {
+                playback.seek(to: videoTime)
+            } else {
+                playback.loadVideo(url: video.url, seekTo: videoTime)
+            }
             return
         }
 
-        let videoTime = TimelineLayout.mediaTime(
-            timelineTime: timelineTime,
-            start: timelineOffsets[video.id, default: 0]
-        )
-        if playback.videoURL == video.url {
-            playback.seek(to: videoTime)
+        if let fallbackURL = playback.videoURL,
+           let fallbackVideo = videoImports.first(where: { $0.url == fallbackURL }) {
+            let fallbackVideoTime = max(0, timelineTime - timelineOffsets[fallbackVideo.id, default: 0])
+            playback.seek(to: fallbackVideoTime)
+            return
+        }
+
+        if let fallbackVideo = videoImports.first {
+            let fallbackVideoTime = max(0, timelineTime - timelineOffsets[fallbackVideo.id, default: 0])
+            playback.loadVideo(url: fallbackVideo.url, seekTo: fallbackVideoTime)
         } else {
-            playback.loadVideo(url: video.url, seekTo: videoTime)
+            playback.pause()
         }
     }
 
@@ -3370,8 +3401,8 @@ private struct TimelineEditor: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             PlaybackControls(playback: playback)
-                .opacity(playback.videoURL == nil ? 0 : 1)
-                .allowsHitTesting(playback.videoURL != nil)
+                .opacity(videos.isEmpty ? 0 : 1)
+                .allowsHitTesting(!videos.isEmpty)
 
             HStack {
                 if let alignmentStatus {

@@ -296,9 +296,16 @@ enum TimelineLayout {
     }
 }
 
+enum AlignmentConfidence {
+    case low
+    case medium
+    case high
+}
+
 enum TimelineAlignment {
     static let maximumAutomaticSpan = 12 * 60 * 60.0
     static let maximumResumeCalibrationDelay = 90.0
+    static let maximumResumeCalibrationWindow = 180.0
 
     static func normalizedOffsets(for dates: [Date]) -> [Double]? {
         guard let earliestDate = dates.min() else {
@@ -329,14 +336,29 @@ enum TimelineAlignment {
     static func videoClockCorrection(
         firstVideoDate: Date,
         timerResumeDates: [Date]
-    ) -> Double {
-        let nearbyResume = timerResumeDates
-            .filter {
-                let delay = firstVideoDate.timeIntervalSince($0)
-                return delay >= 0 && delay <= maximumResumeCalibrationDelay
+    ) -> (correction: Double, confidence: AlignmentConfidence) {
+        let candidates = timerResumeDates
+            .compactMap { resume -> Double? in
+                let delay = firstVideoDate.timeIntervalSince(resume)
+                guard delay >= 0, delay <= maximumResumeCalibrationWindow else {
+                    return nil
+                }
+                return delay
             }
-            .max()
-        return nearbyResume?.timeIntervalSince(firstVideoDate) ?? 0
+            .sorted()
+
+        guard let closestDelay = candidates.first else {
+            return (0, .low)
+        }
+
+        let correction = -closestDelay
+        if closestDelay <= maximumResumeCalibrationDelay {
+            return (correction, .high)
+        }
+        if closestDelay <= maximumResumeCalibrationWindow {
+            return (correction, .medium)
+        }
+        return (0, .low)
     }
 
     static func isSequentialCameraFirstFile(_ fileName: String) -> Bool {

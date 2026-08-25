@@ -419,14 +419,16 @@ struct TimelineAlignmentTests {
         let fitStart = try #require(formatter.date(from: "2026-08-05T05:46:23+08:00"))
         let videoStart = try #require(formatter.date(from: "2026-08-05T05:54:11+08:00"))
         let timerResume = try #require(formatter.date(from: "2026-08-05T05:53:21+08:00"))
-        let correction = TimelineAlignment.videoClockCorrection(
+        let estimate = TimelineAlignment.videoClockCorrection(
             firstVideoDate: videoStart,
             timerResumeDates: [timerResume]
         )
+        let correction = estimate.correction
         let offsets = try #require(TimelineAlignment.normalizedOffsets(
             for: [fitStart, videoStart.addingTimeInterval(correction)]
         ))
 
+        #expect(estimate.confidence == .high)
         #expect(correction == -50)
         #expect(offsets == [0, 418])
         #expect(TimelineAlignment.canAutomaticallyAlign(offsets: offsets))
@@ -462,6 +464,21 @@ struct TimelineAlignmentTests {
         )
 
         #expect(alignedDate == firstFileDate)
+    }
+
+    @Test("Distant resume dates remain valid but lower confidence")
+    func distantResumeAlignmentIsConservative() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let videoStart = base.addingTimeInterval(600)
+        let resume = base.addingTimeInterval(420)
+
+        let estimate = TimelineAlignment.videoClockCorrection(
+            firstVideoDate: videoStart,
+            timerResumeDates: [resume]
+        )
+
+        #expect(estimate.correction == -180)
+        #expect(estimate.confidence == .medium)
     }
 
     @Test("FIT start is used as the timeline anchor when a file is created earlier")
