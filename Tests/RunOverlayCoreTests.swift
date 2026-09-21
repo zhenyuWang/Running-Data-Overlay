@@ -202,6 +202,21 @@ struct FitActivityTests {
 
 @Suite("Overlay design contract")
 struct OverlayDesignTests {
+    @Test("Video rotation normalizes turns and swaps display dimensions")
+    func videoOrientation() {
+        let landscape = CGSize(width: 1_920, height: 1_080)
+
+        #expect(VideoOrientation.normalizedQuarterTurns(-1) == 3)
+        #expect(VideoOrientation.normalizedQuarterTurns(5) == 1)
+        #expect(VideoOrientation.degrees(for: -1) == 270)
+        #expect(VideoOrientation.displaySize(for: landscape, additionalQuarterTurns: 0) == landscape)
+        #expect(VideoOrientation.displaySize(
+            for: landscape,
+            additionalQuarterTurns: 1
+        ) == CGSize(width: 1_080, height: 1_920))
+        #expect(VideoOrientation.displaySize(for: landscape, additionalQuarterTurns: 2) == landscape)
+    }
+
     @Test("Default window fills screen height and uses 70 percent width")
     func defaultWindowSize() {
         let size = OverlayDesign.defaultWindowSize(
@@ -215,6 +230,8 @@ struct OverlayDesignTests {
     @Test("Export sheet keeps a stable readable size")
     func exportSheetSize() {
         #expect(OverlayDesign.exportSheetSize == CGSize(width: 440, height: 520))
+        #expect(OverlayDesign.exportSheetHeaderHeight == 52)
+        #expect(OverlayDesign.exportSheetFooterHeight == 64)
     }
 
     @Test("Component scale follows the limiting canvas dimension")

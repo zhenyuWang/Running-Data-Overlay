@@ -14,6 +14,26 @@ enum OverlayComponentKind: CaseIterable, Hashable, Sendable {
     case weather
 }
 
+enum VideoOrientation {
+    static func normalizedQuarterTurns(_ quarterTurns: Int) -> Int {
+        let remainder = quarterTurns % 4
+        return remainder >= 0 ? remainder : remainder + 4
+    }
+
+    static func degrees(for quarterTurns: Int) -> Double {
+        Double(normalizedQuarterTurns(quarterTurns) * 90)
+    }
+
+    static func displaySize(
+        for size: CGSize,
+        additionalQuarterTurns: Int
+    ) -> CGSize {
+        normalizedQuarterTurns(additionalQuarterTurns).isMultiple(of: 2)
+            ? size
+            : CGSize(width: size.height, height: size.width)
+    }
+}
+
 struct OverlayPositionSpec: Equatable, Sendable {
     let horizontal: Double
     let vertical: Double
@@ -23,6 +43,8 @@ enum OverlayDesign {
     static let defaultWindowWidthRatio: CGFloat = 0.70
     static let canvasReferenceSize = CGSize(width: 1_064, height: 598)
     static let exportSheetSize = CGSize(width: 440, height: 520)
+    static let exportSheetHeaderHeight: CGFloat = 52
+    static let exportSheetFooterHeight: CGFloat = 64
     static let badgeContentSpacing: CGFloat = 7
     static let metricValueUnitSpacing: CGFloat = badgeContentSpacing / 2
     static let badgeHorizontalPadding: CGFloat = 10

@@ -157,7 +157,10 @@ private struct ContentView: View {
 
             VStack(spacing: 20) {
                 ZStack {
-                    PlayerView(player: playback.player)
+                    VideoPreview(
+                        player: playback.player,
+                        manualRotationQuarterTurns: selectedVideo?.manualRotationQuarterTurns ?? 0
+                    )
                     OverlayCanvas(
                         overlays: $overlayComponents,
                         selectedOverlayID: $selectedOverlayID,
@@ -168,7 +171,7 @@ private struct ContentView: View {
                         )
                     )
                 }
-                .aspectRatio(16 / 9, contentMode: .fit)
+                .aspectRatio(previewAspectRatio, contentMode: .fit)
                 .frame(maxWidth: .infinity)
 
                 if !videoImports.isEmpty || fitImport != nil {
@@ -248,10 +251,13 @@ private struct ContentView: View {
                             ForEach(videoImports) { video in
                                 AssetRow(
                                     title: video.url.lastPathComponent,
-                                    subtitle: "视频",
+                                    subtitle: video.orientationSubtitle,
                                     systemImage: "video.fill",
                                     isSelected: playback.videoURL == video.url,
                                     onSelect: { playback.loadVideo(url: video.url) },
+                                    onRotateLeft: { rotateVideo(video, by: -1) },
+                                    onRotateRight: { rotateVideo(video, by: 1) },
+                                    onResetRotation: { resetVideoRotation(video) },
                                     onDelete: { removeVideo(video) }
                                 )
                             }
@@ -331,10 +337,25 @@ private struct ContentView: View {
         return timelineOffsets[fitImport.id, default: 0]
     }
 
+    private var selectedVideo: VideoImport? {
+        guard let videoURL = playback.videoURL else {
+            return nil
+        }
+        return videoImports.first { $0.url == videoURL }
+    }
+
+    private var previewAspectRatio: CGFloat {
+        guard let resolution = selectedVideo?.displayResolution,
+              resolution.width > 0,
+              resolution.height > 0 else {
+            return 16 / 9
+        }
+        return resolution.width / resolution.height
+    }
+
     private var exportVideo: VideoImport? {
-        if let videoURL = playback.videoURL,
-           let loadedVideo = videoImports.first(where: { $0.url == videoURL }) {
-            return loadedVideo
+        if let selectedVideo {
+            return selectedVideo
         }
         return videoImports.last
     }
@@ -386,7 +407,7 @@ private struct ContentView: View {
             videoID: video.id,
             videoFileName: video.url.lastPathComponent,
             fitFileName: fitImport.fileName,
-            resolution: video.resolution ?? CGSize(width: 1_920, height: 1_080),
+            resolution: video.displayResolution ?? CGSize(width: 1_920, height: 1_080),
             timelineStart: timelineStart,
             timelineEnd: timelineEnd,
             exportsCompleteDataLayer: exportsCompleteDataLayer
@@ -662,6 +683,22 @@ private struct ContentView: View {
         } else {
             playback.unloadVideo()
         }
+    }
+
+    private func rotateVideo(_ video: VideoImport, by quarterTurns: Int) {
+        guard let index = videoImports.firstIndex(where: { $0.id == video.id }) else {
+            return
+        }
+        videoImports[index].manualRotationQuarterTurns = VideoOrientation.normalizedQuarterTurns(
+            videoImports[index].manualRotationQuarterTurns + quarterTurns
+        )
+    }
+
+    private func resetVideoRotation(_ video: VideoImport) {
+        guard let index = videoImports.firstIndex(where: { $0.id == video.id }) else {
+            return
+        }
+        videoImports[index].manualRotationQuarterTurns = 0
     }
 
     private func removeFITFile() {
@@ -2604,6 +2641,9 @@ private struct AssetRow: View {
     let systemImage: String
     var isSelected = false
     var onSelect: (() -> Void)?
+    var onRotateLeft: (() -> Void)?
+    var onRotateRight: (() -> Void)?
+    var onResetRotation: (() -> Void)?
     let onDelete: () -> Void
 
     var body: some View {
@@ -2625,6 +2665,26 @@ private struct AssetRow: View {
             }
             .buttonStyle(.plain)
             .disabled(onSelect == nil)
+
+            if let onRotateLeft, let onRotateRight, let onResetRotation {
+                Menu {
+                    Button(action: onRotateLeft) {
+                        Label("向左旋转 90°", systemImage: "rotate.left")
+                    }
+                    Button(action: onRotateRight) {
+                        Label("向右旋转 90°", systemImage: "rotate.right")
+                    }
+                    Divider()
+                    Button(action: onResetRotation) {
+                        Label("恢复自动方向", systemImage: "arrow.counterclockwise")
+                    }
+                } label: {
+                    Image(systemName: "rotate.right")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("调整视频方向")
+            }
 
             Button(role: .destructive, action: onDelete) {
                 Image(systemName: "trash")
@@ -2732,158 +2792,187 @@ private struct ExportOverlaySheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        CompactScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack {
-                    Label("导出透明数据层", systemImage: "square.and.arrow.up")
-                        .font(.headline)
-                    Spacer()
-                    Button(action: dismiss.callAsFunction) {
-                        Image(systemName: "xmark")
-                    }
-                    .buttonStyle(.borderless)
-                    .help("关闭")
-                    .disabled(isExporting)
+        VStack(spacing: 0) {
+            HStack {
+                Label("导出透明数据层", systemImage: "square.and.arrow.up")
+                    .font(.headline)
+                Spacer()
+                Button(action: dismiss.callAsFunction) {
+                    Image(systemName: "xmark")
                 }
+                .buttonStyle(.borderless)
+                .help("关闭")
+                .disabled(isExporting)
+            }
+            .padding(.horizontal, 20)
+            .frame(height: OverlayDesign.exportSheetHeaderHeight)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("导出范围")
-                        .font(.subheadline.weight(.semibold))
-                    Picker("导出范围", selection: $exportScope) {
-                        ForEach(ExportScope.allCases) { scope in
-                            Text(scope.title).tag(scope)
+            Divider()
+
+            CompactScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Text("导出范围")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 68, alignment: .leading)
+                        Picker("导出范围", selection: $exportScope) {
+                            ForEach(ExportScope.allCases) { scope in
+                                Text(scope.title).tag(scope)
+                            }
                         }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(isExporting)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(isExporting)
-                }
 
-                Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
-                    .disabled(isExporting || exportScope == .allMatchingVideos)
+                    HStack {
+                        Text("完整数据层")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Toggle("导出完整数据层", isOn: $exportsCompleteDataLayer)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .disabled(isExporting || exportScope == .allMatchingVideos)
+                    }
                     .opacity(exportScope == .allMatchingVideos ? 0.5 : 1)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("分辨率")
-                        .font(.subheadline.weight(.semibold))
-                    Picker("分辨率", selection: $exportResolution) {
-                        ForEach(OverlayExportResolution.allCases) { resolution in
-                            Text(resolution.title).tag(resolution)
+                    HStack(spacing: 12) {
+                        Text("分辨率")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 68, alignment: .leading)
+                        Picker("分辨率", selection: $exportResolution) {
+                            ForEach(OverlayExportResolution.allCases) { resolution in
+                                Text(resolution.title).tag(resolution)
+                            }
                         }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(isExporting)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(isExporting)
-                }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("帧率")
-                        .font(.subheadline.weight(.semibold))
-                    Picker("帧率", selection: $exportFrameRate) {
-                        ForEach(OverlayExportFrameRate.allCases) { frameRate in
-                            Text(frameRate.title).tag(frameRate)
+                    HStack(spacing: 12) {
+                        Text("帧率")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(width: 68, alignment: .leading)
+                        Picker("帧率", selection: $exportFrameRate) {
+                            ForEach(OverlayExportFrameRate.allCases) { frameRate in
+                                Text(frameRate.title).tag(frameRate)
+                            }
                         }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .disabled(isExporting)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .disabled(isExporting)
-                }
-
-                if exportScope == .allMatchingVideos {
-                    Text("将导出 \(matchingExportRanges.count) 个与 FIT 数据在时间线上重叠的视频浮层。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else if let exportRange = currentExportRange {
-                    Text(
-                        exportRange.exportsCompleteDataLayer
-                            ? "导出 FIT 对应的完整数据层。"
-                            : "仅导出视频素材与 FIT 数据重叠的部分。"
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
 
                     Divider()
 
-                    ExportInfoRow(title: "源视频分辨率", value: exportRange.sourceResolutionDescription)
-                    ExportInfoRow(
-                        title: "导出分辨率",
-                        value: exportRange.outputResolutionDescription(for: exportResolution)
-                    )
-                    ExportInfoRow(title: "导出帧率", value: exportFrameRate.title)
-                    ExportInfoRow(title: "时长", value: exportRange.durationDescription)
-                    ExportInfoRow(title: "时间线范围", value: exportRange.timelineRangeDescription)
-                    ExportInfoRow(
-                        title: "预计大小",
-                        value: exportRange.estimatedFileSizeDescription(
-                            resolution: exportResolution,
-                            frameRate: exportFrameRate
-                        )
-                    )
-                    ExportInfoRow(title: "视频素材", value: exportRange.videoFileName)
-                    ExportInfoRow(title: "运动文件", value: exportRange.fitFileName)
-
-                    Text("预计大小基于针对透明数据层优化的 HEVC Alpha 码率，实际结果会随图层复杂度变化。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("暂时无法计算导出范围")
-                            .font(.subheadline.weight(.semibold))
-                        Text("请导入包含有效时长的视频和 FIT 运动文件，并在时间线上让两者重叠；或者勾选“导出完整数据层”以导出 FIT 的完整范围。")
+                    if exportScope == .allMatchingVideos {
+                        Text("将导出 \(matchingExportRanges.count) 个与 FIT 数据在时间线上重叠的视频浮层。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
+                    } else if let exportRange = currentExportRange {
+                        Text(
+                            exportRange.exportsCompleteDataLayer
+                                ? "导出 FIT 对应的完整数据层。"
+                                : "仅导出视频素材与 FIT 数据重叠的部分。"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                if isExporting || !exportProgressItems.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ProgressView(value: exportProgress) {
-                            Text("正在导出透明数据层")
-                        } currentValueLabel: {
-                            Text("\(Int((exportProgress * 100).rounded()))%")
+                        VStack(spacing: 6) {
+                            ExportInfoRow(title: "源视频分辨率", value: exportRange.sourceResolutionDescription)
+                            ExportInfoRow(
+                                title: "导出分辨率",
+                                value: exportRange.outputResolutionDescription(for: exportResolution)
+                            )
+                            ExportInfoRow(title: "导出帧率", value: exportFrameRate.title)
+                            ExportInfoRow(title: "时长", value: exportRange.durationDescription)
+                            ExportInfoRow(title: "时间线范围", value: exportRange.timelineRangeDescription)
+                            ExportInfoRow(
+                                title: "预计大小",
+                                value: exportRange.estimatedFileSizeDescription(
+                                    resolution: exportResolution,
+                                    frameRate: exportFrameRate
+                                )
+                            )
+                            ExportInfoRow(title: "视频素材", value: exportRange.videoFileName)
+                            ExportInfoRow(title: "运动文件", value: exportRange.fitFileName)
                         }
 
-                        CompactScrollView {
+                        Text("预计大小基于针对透明数据层优化的 HEVC Alpha 码率，实际结果会随图层复杂度变化。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("暂时无法计算导出范围")
+                                .font(.subheadline.weight(.semibold))
+                            Text("请导入包含有效时长的视频和 FIT 运动文件，并在时间线上让两者重叠；或者勾选“导出完整数据层”以导出 FIT 的完整范围。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    if isExporting || !exportProgressItems.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("导出进度")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text("\(Int((exportProgress * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            HStack(spacing: 8) {
+                                ProgressView(value: exportProgress)
+                                if isExporting {
+                                    Button(action: cancelExport) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .symbolRenderingMode(.hierarchical)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("取消导出")
+                                }
+                            }
+
                             VStack(alignment: .leading, spacing: 8) {
                                 ForEach(exportProgressItems) { item in
                                     ExportProgressRow(item: item)
                                 }
                             }
                         }
-                        .frame(maxHeight: 150)
-
-                        if isExporting {
-                            Button(role: .cancel, action: cancelExport) {
-                                Label("取消导出", systemImage: "xmark.circle")
-                            }
-                        }
+                    } else if let exportStatus {
+                        Text(exportStatus.message)
+                            .font(.caption)
+                            .foregroundStyle(exportStatus.color)
                     }
-                } else if let exportStatus {
-                    Text(exportStatus.message)
-                        .font(.caption)
-                        .foregroundStyle(exportStatus.color)
                 }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .frame(width: OverlayDesign.exportSheetSize.width, alignment: .topLeading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                Spacer(minLength: 0)
+            Divider()
 
-                HStack {
-                    Spacer()
-                    if case .success = exportStatus {
-                        Button(action: dismiss.callAsFunction) {
-                            Label("关闭", systemImage: "xmark")
-                        }
-                    } else {
-                        Button(action: export) {
-                            Label("导出浮层", systemImage: "square.and.arrow.up")
-                        }
-                        .disabled(!canExport || isExporting)
+            HStack {
+                Spacer()
+                if case .success = exportStatus {
+                    Button(action: dismiss.callAsFunction) {
+                        Label("关闭", systemImage: "xmark")
                     }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button(action: export) {
+                        Label("导出浮层", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canExport || isExporting)
                 }
             }
-            .padding(20)
-            .frame(width: OverlayDesign.exportSheetSize.width, alignment: .topLeading)
-            .frame(minHeight: OverlayDesign.exportSheetSize.height, alignment: .topLeading)
+            .padding(.horizontal, 20)
+            .frame(height: OverlayDesign.exportSheetFooterHeight)
         }
         .frame(
             width: OverlayDesign.exportSheetSize.width,
@@ -3253,10 +3342,29 @@ private struct VideoImport: Identifiable {
     let fileCreationDate: Date?
     var duration: Double?
     var resolution: CGSize?
+    var manualRotationQuarterTurns = 0
 
     init(url: URL) {
         self.url = url
         fileCreationDate = try? url.resourceValues(forKeys: [.creationDateKey]).creationDate
+    }
+
+    var displayResolution: CGSize? {
+        resolution.map {
+            VideoOrientation.displaySize(
+                for: $0,
+                additionalQuarterTurns: manualRotationQuarterTurns
+            )
+        }
+    }
+
+    var orientationSubtitle: String {
+        switch VideoOrientation.normalizedQuarterTurns(manualRotationQuarterTurns) {
+        case 1: return "视频 · 已向右旋转 90°"
+        case 2: return "视频 · 已旋转 180°"
+        case 3: return "视频 · 已向左旋转 90°"
+        default: return "视频 · 自动方向"
+        }
     }
 
     var sequentialCameraBatchReferenceDate: Date? {
@@ -3284,6 +3392,30 @@ private struct VideoImport: Identifiable {
             }
             return try? siblingURL.resourceValues(forKeys: [.creationDateKey]).creationDate
         }.min()
+    }
+}
+
+private struct VideoPreview: View {
+    let player: AVPlayer
+    let manualRotationQuarterTurns: Int
+
+    var body: some View {
+        GeometryReader { geometry in
+            let normalizedTurns = VideoOrientation.normalizedQuarterTurns(manualRotationQuarterTurns)
+            let swapsDimensions = !normalizedTurns.isMultiple(of: 2)
+
+            ZStack {
+                Color.black
+                PlayerView(player: player)
+                    .frame(
+                        width: swapsDimensions ? geometry.size.height : geometry.size.width,
+                        height: swapsDimensions ? geometry.size.width : geometry.size.height
+                    )
+                    .rotationEffect(.degrees(VideoOrientation.degrees(for: normalizedTurns)))
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipped()
+        }
     }
 }
 
