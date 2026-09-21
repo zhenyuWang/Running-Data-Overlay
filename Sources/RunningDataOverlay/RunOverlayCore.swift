@@ -7,6 +7,7 @@ enum OverlayComponentKind: CaseIterable, Hashable, Sendable {
     case heartRate
     case cadence
     case strideLength
+    case elevation
     case gpsTrack
     case elapsedTime
     case activityDateTime
@@ -80,6 +81,7 @@ enum OverlayDesign {
         case .heartRate: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.802)
         case .cadence: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.848)
         case .strideLength: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.894)
+        case .elevation: return OverlayPositionSpec(horizontal: 0.06, vertical: 0.710)
         case .gpsTrack: return OverlayPositionSpec(horizontal: 0.936, vertical: 0.25)
         case .elapsedTime: return OverlayPositionSpec(horizontal: 0.052, vertical: 0.94)
         case .activityDateTime: return OverlayPositionSpec(horizontal: 0.94, vertical: 0.922)
@@ -96,7 +98,7 @@ enum OverlayDesign {
         case .pace: return 1.15
         case .cadence: return 0.84
         case .strideLength: return 1.30
-        case .distance, .heartRate, .gpsTrack, .elapsedTime, .activityDateTime, .weather: return 1
+        case .distance, .heartRate, .elevation, .gpsTrack, .elapsedTime, .activityDateTime, .weather: return 1
         }
     }
 
@@ -159,6 +161,7 @@ enum OverlayDesign {
             || component == .heartRate
             || component == .cadence
             || component == .strideLength
+            || component == .elevation
     }
 }
 

@@ -8,6 +8,7 @@ struct FitActivity {
     let averageHeartRate: Int?
     let averageCadence: Int?
     let averageStrideLengthMeters: Double?
+    let averageElevationMeters: Double?
     let gpsPoints: [FitGPSPoint]
     let averageTemperatureCelsius: Double?
     let samples: [FitDataPoint]
@@ -22,6 +23,7 @@ struct FitActivity {
         averageHeartRate: Int?,
         averageCadence: Int?,
         averageStrideLengthMeters: Double?,
+        averageElevationMeters: Double? = nil,
         gpsPoints: [FitGPSPoint],
         averageTemperatureCelsius: Double?,
         samples: [FitDataPoint],
@@ -35,6 +37,7 @@ struct FitActivity {
         self.averageHeartRate = averageHeartRate
         self.averageCadence = averageCadence
         self.averageStrideLengthMeters = averageStrideLengthMeters
+        self.averageElevationMeters = averageElevationMeters
         self.gpsPoints = gpsPoints
         self.averageTemperatureCelsius = averageTemperatureCelsius
         self.samples = samples
@@ -139,6 +142,7 @@ struct FitDataPoint {
     let latitude: Double?
     let longitude: Double?
     let temperatureCelsius: Double?
+    let elevationMeters: Double?
 }
 
 struct FitGPSPoint {
@@ -337,7 +341,8 @@ private struct FitBinaryParser {
                 cadence: record.cadence,
                 latitude: record.latitude,
                 longitude: record.longitude,
-                temperatureCelsius: record.temperatureCelsius
+                temperatureCelsius: record.temperatureCelsius,
+                elevationMeters: record.elevationMeters
             )
         }
 
@@ -349,6 +354,8 @@ private struct FitBinaryParser {
             averageHeartRate: averageHeartRate,
             averageCadence: averageCadence,
             averageStrideLengthMeters: calculateAverageStrideLength(),
+            averageElevationMeters: session?.averageElevationMeters
+                ?? average(records.compactMap(\.elevationMeters)),
             gpsPoints: gpsPoints,
             averageTemperatureCelsius: average(records.compactMap(\.temperatureCelsius)),
             samples: samples,
@@ -446,6 +453,7 @@ private struct FitRecord {
     let latitude: Double?
     let longitude: Double?
     let temperatureCelsius: Double?
+    let elevationMeters: Double?
 
     init(values: [UInt8: Double], timestamp: UInt32?) {
         self.timestamp = timestamp
@@ -456,6 +464,9 @@ private struct FitRecord {
         latitude = values[0].map { $0 * 180 / 2_147_483_648 }
         longitude = values[1].map { $0 * 180 / 2_147_483_648 }
         temperatureCelsius = values[13]
+        // FIT record altitude fields use a scale of 5 and an offset of 500 m.
+        // Enhanced altitude has greater range and should take precedence when present.
+        elevationMeters = (values[78] ?? values[2]).map { $0 / 5 - 500 }
     }
 }
 
@@ -467,6 +478,7 @@ private struct FitSession {
     let averageHeartRate: Int?
     let averageCadence: Int?
     let totalTimerTimeSeconds: Double?
+    let averageElevationMeters: Double?
 
     init(values: [UInt8: Double], timestamp: UInt32?) {
         self.timestamp = timestamp
@@ -476,6 +488,8 @@ private struct FitSession {
         averageHeartRate = values[16].map { Int($0) }
         averageCadence = values[18].map { Int($0) * 2 }
         totalTimerTimeSeconds = values[8].map { $0 / 1_000 }
+        // Session enhanced_avg_altitude (124) supersedes avg_altitude (49).
+        averageElevationMeters = (values[124] ?? values[49]).map { $0 / 5 - 500 }
     }
 }
 

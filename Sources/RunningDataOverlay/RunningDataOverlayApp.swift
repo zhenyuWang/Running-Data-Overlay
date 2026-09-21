@@ -898,6 +898,7 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
     case heartRate
     case cadence
     case strideLength
+    case elevation
     case gpsTrack
     case elapsedTime
     case activityDateTime
@@ -912,6 +913,7 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
         case .heartRate: return .heartRate
         case .cadence: return .cadence
         case .strideLength: return .strideLength
+        case .elevation: return .elevation
         case .gpsTrack: return .gpsTrack
         case .elapsedTime: return .elapsedTime
         case .activityDateTime: return .activityDateTime
@@ -931,6 +933,8 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
             return "步频"
         case .strideLength:
             return "步幅"
+        case .elevation:
+            return "海拔"
         case .gpsTrack:
             return "GPS 轨迹"
         case .elapsedTime:
@@ -954,6 +958,8 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
             return "shoe.fill"
         case .strideLength:
             return "figure.walk"
+        case .elevation:
+            return "mountain.2.fill"
         case .gpsTrack:
             return "point.topleft.down.curvedto.point.bottomright.up"
         case .elapsedTime:
@@ -967,7 +973,7 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
 
     var supportsBackground: Bool {
         switch self {
-        case .pace, .heartRate, .cadence, .strideLength, .elapsedTime, .activityDateTime, .weather:
+        case .pace, .heartRate, .cadence, .strideLength, .elevation, .elapsedTime, .activityDateTime, .weather:
             return true
         case .distance, .gpsTrack:
             return false
@@ -995,6 +1001,9 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
         case .strideLength:
             guard let strideLength = activity.averageStrideLengthMeters else { return "FIT 未记录" }
             return String(format: "平均 %.2f m", strideLength)
+        case .elevation:
+            guard let elevation = activity.averageElevationMeters else { return "FIT 未记录" }
+            return String(format: "平均 %.0f m", elevation)
         case .gpsTrack:
             return activity.gpsPoints.isEmpty ? "FIT 未记录" : "\(activity.gpsPoints.count) 个定位点"
         case .elapsedTime:
@@ -1048,6 +1057,12 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
                 return String(format: "%.0f cm", strideLength * 100)
             }
             return String(format: "%.2f m", strideLength)
+        case .elevation:
+            guard let elevation = sample?.elevationMeters ?? activity.averageElevationMeters else { return title }
+            if unit == .feet {
+                return String(format: "%.0f ft", elevation * 3.28084)
+            }
+            return String(format: "%.0f m", elevation)
         case .gpsTrack:
             guard let latitude = sample?.latitude, let longitude = sample?.longitude else { return title }
             return String(format: "%.4f, %.4f", latitude, longitude)
@@ -1116,6 +1131,14 @@ private enum OverlayComponent: CaseIterable, Hashable, Identifiable {
                 return OverlayDisplayValue(value: String(format: "%.0f", strideLength * 100), unit: "cm")
             }
             return OverlayDisplayValue(value: String(format: "%.2f", strideLength), unit: "m")
+        case .elevation:
+            guard let elevation = sample?.elevationMeters ?? activity.averageElevationMeters else {
+                return OverlayDisplayValue(value: title, unit: "")
+            }
+            if unit == .feet {
+                return OverlayDisplayValue(value: String(format: "%.0f", elevation * 3.28084), unit: "ft")
+            }
+            return OverlayDisplayValue(value: String(format: "%.0f", elevation), unit: "m")
         case .gpsTrack:
             guard let latitude = sample?.latitude, let longitude = sample?.longitude else {
                 return OverlayDisplayValue(value: title, unit: "")
@@ -1443,6 +1466,7 @@ private enum OverlayUnit: String, CaseIterable, Identifiable {
         case .heartRate: return .beatsPerMinute
         case .cadence: return .stepsPerMinute
         case .strideLength: return .centimeters
+        case .elevation: return .meters
         case .gpsTrack: return .coordinates
         case .elapsedTime: return .elapsedTime
         case .activityDateTime: return .dateTime
@@ -1457,6 +1481,7 @@ private enum OverlayUnit: String, CaseIterable, Identifiable {
         case .heartRate: return [.beatsPerMinute]
         case .cadence: return [.stepsPerMinute]
         case .strideLength: return [.centimeters, .meters, .feet]
+        case .elevation: return [.meters, .feet]
         case .gpsTrack: return [.coordinates]
         case .elapsedTime: return [.elapsedTime]
         case .activityDateTime: return [.dateTime]

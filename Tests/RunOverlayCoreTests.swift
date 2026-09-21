@@ -70,6 +70,61 @@ struct FitActivityTests {
         }
     }
 
+    @Test("FIT record altitude is decoded and enhanced altitude takes precedence")
+    func altitudeParsing() throws {
+        var payload: [UInt8] = [
+            0x40,       // Definition message for local message 0.
+            0, 0,       // Reserved, little-endian architecture.
+            20, 0,      // Record global message number.
+            3,          // Three fields.
+            253, 4, 0x86, // Timestamp (uint32).
+            2, 2, 0x84,   // Altitude (uint16).
+            78, 4, 0x86   // Enhanced altitude (uint32).
+        ]
+
+        func appendUInt16(_ value: UInt16, to bytes: inout [UInt8]) {
+            bytes.append(UInt8(truncatingIfNeeded: value))
+            bytes.append(UInt8(truncatingIfNeeded: value >> 8))
+        }
+
+        func appendUInt32(_ value: UInt32, to bytes: inout [UInt8]) {
+            for shift in stride(from: 0, through: 24, by: 8) {
+                bytes.append(UInt8(truncatingIfNeeded: value >> UInt32(shift)))
+            }
+        }
+
+        payload.append(0)
+        appendUInt32(100, to: &payload)
+        appendUInt16(3_000, to: &payload) // 100 m; superseded below.
+        appendUInt32(3_117, to: &payload) // 123.4 m.
+
+        payload.append(0)
+        appendUInt32(101, to: &payload)
+        appendUInt16(2_750, to: &payload) // 50 m fallback.
+        appendUInt32(.max, to: &payload)  // Invalid enhanced altitude.
+
+        var bytes = [UInt8](repeating: 0, count: 12)
+        bytes[0] = 12
+        bytes[1] = 0x10
+        let payloadSize = UInt32(payload.count)
+        for shift in stride(from: 0, through: 24, by: 8) {
+            bytes[4 + shift / 8] = UInt8(truncatingIfNeeded: payloadSize >> UInt32(shift))
+        }
+        bytes[8...11] = [0x2E, 0x46, 0x49, 0x54]
+        bytes.append(contentsOf: payload)
+
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).fit")
+        try Data(bytes).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let activity = try FitParser.parse(url: fileURL)
+        #expect(activity.samples.count == 2)
+        #expect(abs((activity.samples[0].elevationMeters ?? 0) - 123.4) < 0.000_001)
+        #expect(activity.samples[1].elevationMeters == 50)
+        #expect(abs((activity.averageElevationMeters ?? 0) - 86.7) < 0.000_001)
+    }
+
     @Test("Movement timer excludes paused intervals")
     func movementTimer() {
         let activity = FitActivity(
@@ -121,7 +176,8 @@ struct FitActivityTests {
             cadence: cadence,
             latitude: nil,
             longitude: nil,
-            temperatureCelsius: nil
+            temperatureCelsius: nil,
+            elevationMeters: nil
         )
     }
 
@@ -181,6 +237,7 @@ struct OverlayDesignTests {
             .heartRate: OverlayPositionSpec(horizontal: 0.06, vertical: 0.802),
             .cadence: OverlayPositionSpec(horizontal: 0.06, vertical: 0.848),
             .strideLength: OverlayPositionSpec(horizontal: 0.06, vertical: 0.894),
+            .elevation: OverlayPositionSpec(horizontal: 0.06, vertical: 0.710),
             .gpsTrack: OverlayPositionSpec(horizontal: 0.936, vertical: 0.25),
             .elapsedTime: OverlayPositionSpec(horizontal: 0.052, vertical: 0.94),
             .activityDateTime: OverlayPositionSpec(horizontal: 0.94, vertical: 0.922),
@@ -201,7 +258,7 @@ struct OverlayDesignTests {
         #expect(abs(distanceOffsetPixels - 10) < 0.000_001)
 
         let lowerLeftComponents: [OverlayComponentKind] = [
-            .pace, .heartRate, .cadence, .strideLength, .elapsedTime
+            .elevation, .pace, .heartRate, .cadence, .strideLength, .elapsedTime
         ]
         let verticalPositions = lowerLeftComponents.map {
             OverlayDesign.defaultPosition(for: $0).vertical
