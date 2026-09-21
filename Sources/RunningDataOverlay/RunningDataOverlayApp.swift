@@ -2936,10 +2936,18 @@ private struct ExportOverlaySheet: View {
                                 }
                             }
 
-                            VStack(alignment: .leading, spacing: 8) {
-                                ForEach(exportProgressItems) { item in
-                                    ExportProgressRow(item: item)
+                            if exportProgressItems.count > 1 {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ForEach(exportProgressItems) { item in
+                                        ExportProgressRow(item: item)
+                                    }
                                 }
+                            }
+
+                            if let exportStatus {
+                                Text(exportStatus.message)
+                                    .font(.caption)
+                                    .foregroundStyle(exportStatus.color)
                             }
                         }
                     } else if let exportStatus {
