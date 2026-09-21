@@ -2919,7 +2919,7 @@ private struct ExportOverlaySheet: View {
                                 Text("导出进度")
                                     .font(.subheadline.weight(.semibold))
                                 Spacer()
-                                Text("\(Int((exportProgress * 100).rounded()))%")
+                                Text(String(format: "%.2f%%", exportProgress * 100))
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             }
@@ -3227,7 +3227,8 @@ private enum OverlayVideoExporter {
         let hasTimelineDrivenOverlays = configuration.overlays.contains { overlay in
             overlay.component != .weather
         }
-        let progressUpdateInterval = max(1, frameCount / 1_000)
+        // Keep long exports responsive enough for a two-decimal percentage display.
+        let progressUpdateInterval = max(1, frameCount / 10_000)
         var cachedRenderKey: Int?
         var cachedPixelBuffer: CVPixelBuffer?
 
