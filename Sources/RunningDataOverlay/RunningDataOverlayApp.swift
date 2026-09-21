@@ -2882,10 +2882,13 @@ private struct ExportOverlaySheet: View {
                 }
             }
             .padding(20)
-            .frame(width: 440, alignment: .topLeading)
-            .frame(minHeight: 300, alignment: .topLeading)
+            .frame(width: OverlayDesign.exportSheetSize.width, alignment: .topLeading)
+            .frame(minHeight: OverlayDesign.exportSheetSize.height, alignment: .topLeading)
         }
-        .frame(maxHeight: 520)
+        .frame(
+            width: OverlayDesign.exportSheetSize.width,
+            height: OverlayDesign.exportSheetSize.height
+        )
     }
 
     private var canExport: Bool {

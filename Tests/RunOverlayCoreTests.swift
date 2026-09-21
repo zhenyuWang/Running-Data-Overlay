@@ -212,6 +212,11 @@ struct OverlayDesignTests {
         #expect(OverlayDesign.defaultWindowWidthRatio == 0.70)
     }
 
+    @Test("Export sheet keeps a stable readable size")
+    func exportSheetSize() {
+        #expect(OverlayDesign.exportSheetSize == CGSize(width: 440, height: 520))
+    }
+
     @Test("Component scale follows the limiting canvas dimension")
     func componentScale() {
         #expect(OverlayDesign.componentScale(

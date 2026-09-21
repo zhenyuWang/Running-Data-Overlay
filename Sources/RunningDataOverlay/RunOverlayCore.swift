@@ -22,6 +22,7 @@ struct OverlayPositionSpec: Equatable, Sendable {
 enum OverlayDesign {
     static let defaultWindowWidthRatio: CGFloat = 0.70
     static let canvasReferenceSize = CGSize(width: 1_064, height: 598)
+    static let exportSheetSize = CGSize(width: 440, height: 520)
     static let badgeContentSpacing: CGFloat = 7
     static let metricValueUnitSpacing: CGFloat = badgeContentSpacing / 2
     static let badgeHorizontalPadding: CGFloat = 10
